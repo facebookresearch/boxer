@@ -5709,7 +5709,7 @@ def _load_timed_obbs(args: argparse.Namespace, root_path: str, csv_path: str):
         timed_obbs = _subsample_timed_obbs_by_skip_n(timed_obbs, args.skip_n)
         return timed_obbs
 
-    bb2d_path = os.path.join(root_path, args.bb2d_csv) if args.bb2_compare else None
+    bb2d_path = os.path.join(root_path, args.bb2d_csv)
     maybe_download_from_fed(csv_path=csv_path, fed=args.fed, bb2d_csv_path=bb2d_path)
     timed_obbs = load_timed_obbs_csv(
         csv_path=csv_path,
@@ -5737,7 +5737,7 @@ def main() -> None:
 
     # Common args
     parser.add_argument("--seq", type=str, default="sor01")
-    parser.add_argument("--csv", type=str, default="boxer_obbs.csv")
+    parser.add_argument("--csv", type=str, default="boxer_3dbbs.csv")
     parser.add_argument("--fed", action="store_true")
     parser.add_argument("--force_anything", action="store_true")
     parser.add_argument(
@@ -5815,8 +5815,7 @@ def main() -> None:
     parser.add_argument("--start_n", type=int, default=0)
     parser.add_argument("--skip_n", type=int, default=1)
     parser.add_argument("--mps", action="store_true")
-    parser.add_argument("--bb2_compare", action="store_true")
-    parser.add_argument("--bb2d_csv", type=str, default="boxer_obbs_2d.csv")
+    parser.add_argument("--bb2d_csv", type=str, default="boxer_2dbbs.csv")
     parser.add_argument(
         "--init_show_obs", action="store_true", help="initially show observed points"
     )
@@ -5897,7 +5896,7 @@ def main() -> None:
         mglw.run_window_config(ConfiguredFusionViewer)
         return
 
-    bb2d_csv_path = os.path.join(root_path, args.bb2d_csv) if args.bb2_compare else ""
+    bb2d_csv_path = os.path.join(root_path, args.bb2d_csv)
 
     class ConfiguredTrackerViewer(TrackerViewer):
         window_size = (init_w, init_h)

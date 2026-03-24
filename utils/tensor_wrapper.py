@@ -344,7 +344,7 @@ class TensorWrapper:
         return self.__class__(self._data[index])
 
     def __setitem__(self, index, item):
-        self._data[index] = item.data
+        self._data[index] = item._data if isinstance(item, TensorWrapper) else item
 
     def to(self, *args, **kwargs):
         return self.__class__(self._data.to(*args, **kwargs))

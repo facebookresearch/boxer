@@ -481,16 +481,17 @@ class BoundingBox3DFuser:
         Returns:
             List of clusters, where each cluster is a list of detection indices
         """
-        from scipy.sparse import csr_matrix
-        from scipy.sparse.csgraph import connected_components
-
         is_sparse = iou_matrix.is_sparse
+
+        # Collect edges (pairs of indices that should be in the same cluster)
+        edges: list[tuple[int, int]] = []
 
         if is_sparse:
             # Sparse path: IoU matrix is already thresholded from iou_mc7_sparse
             iou_coo = iou_matrix.coalesce()
             indices = iou_coo.indices()  # (2, nnz)
             values = iou_coo.values()  # (nnz,)
+            n = iou_matrix.shape[0]
 
             if semantic_matrix is not None:
                 # Look up semantic similarities only for non-zero IoU pairs
@@ -507,30 +508,18 @@ class BoundingBox3DFuser:
                     f"  Semantic cutoff at {self.semantic_threshold:.2f}: blocked {blocked_pairs}/{total_pairs} potential merges"
                 )
 
-                # Filter indices and values
+                # Filter indices
                 indices = indices[:, keep_mask]
-                values = values[keep_mask]
 
-            # Build scipy sparse adjacency matrix directly
-            # Values already >= iou_threshold from iou_mc7_sparse, so all remaining entries form edges
-            n = iou_matrix.shape[0]
-            if indices.shape[1] > 0:
-                adjacency = csr_matrix(
-                    (
-                        torch.ones(indices.shape[1]).numpy(),
-                        (indices[0].numpy(), indices[1].numpy()),
-                    ),
-                    shape=(n, n),
-                )
-            else:
-                adjacency = csr_matrix((n, n))
+            for i in range(indices.shape[1]):
+                edges.append((indices[0, i].item(), indices[1, i].item()))
 
         else:
             # Dense path (original code)
+            n = iou_matrix.shape[0]
+
             # Apply hard semantic cutoff if semantic matrix provided
             if semantic_matrix is not None:
-                # Hard cutoff: if semantic similarity < threshold, block merging by setting IoU to 0
-                # This prevents semantically dissimilar boxes from merging even with high spatial overlap
                 semantic_mask = (
                     semantic_matrix.cpu() >= self.semantic_threshold
                 )  # (N, N) bool
@@ -549,19 +538,35 @@ class BoundingBox3DFuser:
             else:
                 combined_matrix = iou_matrix
 
-            # Create adjacency matrix (combined similarity >= threshold indicates connection)
-            adjacency = (combined_matrix.cpu().numpy() >= self.iou_threshold).astype(
-                int
-            )
-            adjacency = csr_matrix(adjacency)
+            # Find edges from adjacency
+            adj_np = (combined_matrix.cpu().numpy() >= self.iou_threshold)
+            rows, cols = adj_np.nonzero()
+            for r, c in zip(rows, cols):
+                edges.append((int(r), int(c)))
 
-        # Find connected components
-        n_components, labels = connected_components(csgraph=adjacency, directed=False)
+        # Union-Find to compute connected components
+        parent = list(range(n))
 
-        # Group detections by component
-        clusters: list[list[int]] = [[] for _ in range(n_components)]
-        for idx, label in enumerate(labels):
-            clusters[label].append(idx)
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for a, b in edges:
+            union(a, b)
+
+        # Group by root
+        clusters_dict: dict[int, list[int]] = {}
+        for i in range(n):
+            root = find(i)
+            clusters_dict.setdefault(root, []).append(i)
+        clusters: list[list[int]] = list(clusters_dict.values())
 
         # Filter out empty clusters
         clusters = [c for c in clusters if len(c) > 0]

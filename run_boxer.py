@@ -3,6 +3,7 @@
 # pyre-unsafe
 import argparse
 import os
+
 import re
 
 import cv2
@@ -84,7 +85,7 @@ def main():
     parser.add_argument("--thresh3d", type=float, default=0.5, help="detection confidence for boxer")
     parser.add_argument("--labels", type=comma_separated_list, nargs="?", const=[], default=["lvisplus"], help="Optional comma-separated list of text prompts (e.g. --labels=small or --labels=chair,table,lamp)")
     parser.add_argument("--detector_hw", type=int, default=800, help="resize images before going into 2D detector")
-    parser.add_argument("--write_name", default="boxer_obbs", type=str, help="name of outputs")
+    parser.add_argument("--write_name", default="boxer", type=str, help="name prefix for outputs")
     parser.add_argument("--skip_viz", action="store_true", help="skip visualization")
     parser.add_argument("--no_sdp", action="store_true", help="turn off SDP input")
     parser.add_argument("--force_cpu", action="store_true", help="force CPU")
@@ -255,14 +256,14 @@ def main():
     output_dir = os.path.expanduser(args.output_dir)
     log_dir = os.path.join(output_dir, seq_name)
     os.makedirs(log_dir, exist_ok=True)
-    video_dir = os.path.join(log_dir, f"{args.write_name}_video")
+    video_dir = os.path.join(log_dir, f"{args.write_name}_viz")
     if not args.skip_viz:
         safe_delete_folder(
             video_dir, extensions=[".png"], keep_folder=True, recursive=True
         )
         os.makedirs(video_dir, exist_ok=True)
         print(
-            f"==> Current frame: {os.path.join(log_dir, f'{args.write_name}_current.png')}"
+            f"==> Current frame: {os.path.join(log_dir, f'{args.write_name}_viz_current.png')}"
         )
     print(f"==> Created output folder {log_dir}")
 
@@ -278,9 +279,9 @@ def main():
         sem_name_to_id = {label: i for i, label in enumerate(text_labels)}
         sem_id_to_name = {v: k for k, v in sem_name_to_id.items()}
 
-    csv_path = os.path.join(log_dir, f"{args.write_name}.csv")
+    csv_path = os.path.join(log_dir, f"{args.write_name}_3dbbs.csv")
     writer = ObbCsvWriter2(csv_path)
-    csv2d_out_path = os.path.join(log_dir, f"{args.write_name}_2d.csv")
+    csv2d_out_path = os.path.join(log_dir, f"{args.write_name}_2dbbs.csv")
 
     tracker = None
     if args.track:
@@ -300,9 +301,9 @@ def main():
         if args.track:
             panels.append(img_np)
         final = np.hstack(panels)
-        out_path = os.path.join(video_dir, f"{args.write_name}_image_{ii:05d}.png")
+        out_path = os.path.join(video_dir, f"{args.write_name}_viz_{ii:05d}.png")
         cv2.imwrite(out_path, final)
-        out_path = os.path.join(log_dir, f"{args.write_name}_current.png")
+        out_path = os.path.join(log_dir, f"{args.write_name}_viz_current.png")
         cv2.imwrite(out_path, final)
 
     timestamps_ns = []  # Collect timestamps to compute FPS
@@ -550,7 +551,7 @@ def main():
                         for t in confirmed
                     ]
                     track_texts = [
-                        f"#{t.track_id} {t.cached_text} ({t.support_count})"
+                        f"{t.cached_text} (n={t.support_count})"
                         for t in confirmed
                     ]
                     viz_track = draw_bb3s(
@@ -568,9 +569,9 @@ def main():
 
             final = np.hstack(panels)
 
-            out_path = os.path.join(video_dir, f"{args.write_name}_image_{ii:05d}.png")
+            out_path = os.path.join(video_dir, f"{args.write_name}_viz_{ii:05d}.png")
             cv2.imwrite(out_path, final)
-            out_path = os.path.join(log_dir, f"{args.write_name}_current.png")
+            out_path = os.path.join(log_dir, f"{args.write_name}_viz_current.png")
             cv2.imwrite(out_path, final)
         t_viz = timer.stop("viz")
 
@@ -598,8 +599,8 @@ def main():
             video_dir,
             fps,
             output_dir=log_dir,
-            image_glob=f"{args.write_name}_image*.png",
-            output_name=f"{args.write_name}_final.mp4",
+            image_glob=f"{args.write_name}_viz_*.png",
+            output_name=f"{args.write_name}_viz_final.mp4",
         )
 
     if args.fuse:

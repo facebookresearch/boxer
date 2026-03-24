@@ -16,6 +16,11 @@ build/
 .DS_Store
 Thumbs.db
 
+# Coverage
+.coverage
+tests/htmlcov/
+htmlcov/
+
 # Environment
 .env
 *.egg

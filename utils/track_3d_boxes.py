@@ -248,7 +248,7 @@ class BoundingBox3DTracker:
             cost_matrix[invalid_mask] = 1e6
 
             # Hungarian assignment
-            from scipy.optimize import linear_sum_assignment
+            from utils.hungarian import linear_sum_assignment
             row_ind, col_ind = linear_sum_assignment(cost_matrix)
             t_hungarian = time.perf_counter()
 

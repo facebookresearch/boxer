@@ -19,7 +19,6 @@ from utils.gravity import gravity_align_T_world_cam
 from utils.image import put_text, torch2cv2
 from utils.pose import PoseTW
 
-from omegaconf import OmegaConf
 
 
 def image_to_patches(x, patch_size=14):
@@ -365,18 +364,16 @@ class BoxerNet(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
-        base_default_cfg = OmegaConf.create(self.base_default_cfg)
-        default_cfg = OmegaConf.create(self.default_cfg)
-        if isinstance(cfg, dict):
-            cfg = OmegaConf.create(cfg)
-        default_cfg = OmegaConf.merge(base_default_cfg, default_cfg)
-        self.cfg = OmegaConf.merge(default_cfg, cfg)
-        cfg = self.cfg
+        if not isinstance(cfg, dict):
+            cfg = dict(cfg)
+        merged = {**self.base_default_cfg, **self.default_cfg, **cfg}
+        self.cfg = merged
+        cfg = merged
 
-        self.dim = cfg.dim
+        self.dim = cfg["dim"]
         self.heads = self.dim // 64
-        self.in_depth = cfg.in_depth
-        self.cross_depth = cfg.cross_depth
+        self.in_depth = cfg["in_depth"]
+        self.cross_depth = cfg["cross_depth"]
         self.with_ray = cfg.get("with_ray", False)
         self.iou_threshes = [0.2, 0.5]
         assert self.cross_depth >= 1, "cross_depth must be at least 1"
@@ -397,7 +394,7 @@ class BoxerNet(nn.Module):
 
         self.query_dim = 4  # (xmin, xmin, ymin, ymax)
 
-        self.head = AleHead(self.dim, 7, norm_chamfer=cfg.norm_chamfer)
+        self.head = AleHead(self.dim, 7, norm_chamfer=cfg["norm_chamfer"])
 
         self.input2emb = torch.nn.Linear(self.in_dim, self.dim)
         self.query2emb = torch.nn.Linear(self.query_dim, self.dim)
@@ -420,11 +417,11 @@ class BoxerNet(nn.Module):
 
         print(f'Loading checkpoint from "{ckpt_path}"')
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-        cfg = OmegaConf.create(ckpt["cfg"])
-        hw = cfg.dataset.image_hw
+        cfg = ckpt["cfg"]
+        hw = cfg["dataset"]["image_hw"]
         print(f"==> hw={hw} from checkpoint config")
 
-        model = cls(cfg.model)
+        model = cls(cfg["model"])
         model_dict = model.state_dict()
         new_ckpt_dict = smart_load(model_dict, ckpt["model"])
         model.load_state_dict(new_ckpt_dict, strict=False)

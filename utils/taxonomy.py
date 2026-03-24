@@ -4,16 +4,14 @@
 import os
 from typing import List, Union
 
-import yaml
-
-# Directory containing label YAML files (same directory as this module)
+# Directory containing label files (same directory as this module)
 _LABELS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def load_text_labels(
     label_list: Union[str, List[str]], verbose: bool = False
 ) -> List[str]:
-    """Load text labels from YAML configuration file.
+    """Load text labels from a plain-text file (one label per line).
 
     Args:
         label_list: Name of the label set to load (e.g. "lvisplus"),
@@ -29,18 +27,18 @@ def load_text_labels(
         label_list = [label_list]
 
     first_label = label_list[0]
-    yaml_path = os.path.join(_LABELS_DIR, f"{first_label}_labels.yaml")
-    if not os.path.exists(yaml_path):
+    txt_path = os.path.join(_LABELS_DIR, f"{first_label}_labels.txt")
+    if not os.path.exists(txt_path):
         return label_list
 
     if verbose:
-        print(f"Loading text labels from {yaml_path}")
-    with open(yaml_path, "r") as f:
-        labels = yaml.safe_load(f)
+        print(f"Loading text labels from {txt_path}")
+    with open(txt_path, "r") as f:
+        labels = [line.strip() for line in f if line.strip()]
 
-    if not labels or not isinstance(labels, list):
+    if not labels:
         raise ValueError(
-            f"Invalid or empty labels in {yaml_path}. Expected a list of strings."
+            f"Invalid or empty labels in {txt_path}. Expected one label per line."
         )
 
     return labels

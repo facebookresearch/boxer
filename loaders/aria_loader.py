@@ -565,11 +565,12 @@ class AriaLoader:
                 modalities["img"] = (
                     first_record.capture_timestamp_ns,
                     last_record.capture_timestamp_ns,
+                    num_frames,
                 )
 
         # traj: Use self.pose_ts min/max
         if self.with_traj and hasattr(self, "pose_ts") and len(self.pose_ts) > 0:
-            modalities["traj"] = (self.pose_ts.min(), self.pose_ts.max())
+            modalities["traj"] = (self.pose_ts.min(), self.pose_ts.max(), len(self.pose_ts))
 
         # sdp: Use self.sdp_times_combined min/max
         if (
@@ -581,22 +582,23 @@ class AriaLoader:
             modalities["sdp"] = (
                 self.sdp_times_combined.min(),
                 self.sdp_times_combined.max(),
+                len(self.sdp_times_combined),
             )
 
         # obb: Use self.obb_ts min/max
         if self.with_obb and hasattr(self, "obb_ts") and len(self.obb_ts) > 0:
-            modalities["obb"] = (self.obb_ts.min(), self.obb_ts.max())
+            modalities["obb"] = (self.obb_ts.min(), self.obb_ts.max(), len(self.obb_ts))
 
         # fsp: Use self.fsp_times min/max
         if self.with_fsp and hasattr(self, "fsp_times") and len(self.fsp_times) > 0:
-            modalities["fsp"] = (self.fsp_times.min(), self.fsp_times.max())
+            modalities["fsp"] = (self.fsp_times.min(), self.fsp_times.max(), len(self.fsp_times))
 
         if not modalities:
             return
 
         # Find global min/max across all modalities
-        global_min = min(start for start, _ in modalities.values())
-        global_max = max(end for _, end in modalities.values())
+        global_min = min(start for start, _, _ in modalities.values())
+        global_max = max(end for _, end, _ in modalities.values())
         total_duration_ns = global_max - global_min
 
         if total_duration_ns <= 0:
@@ -608,13 +610,22 @@ class AriaLoader:
         # Print header
         print("\n==> Modality Time Ranges:")
         bar_width = 50
-        label_width = 8
+
+        # Build labels with Hz
+        labels = {}
+        for name, (start_ns, end_ns, count) in modalities.items():
+            duration_s = (end_ns - start_ns) / 1e9
+            if duration_s > 0 and count > 1:
+                labels[name] = f"{name} [{count / duration_s:.0f}Hz]"
+            else:
+                labels[name] = name
+        label_width = max(len(l) for l in labels.values()) + 1
 
         # Print time scale header
         print(f"{' ' * label_width} 0.0s{' ' * (bar_width - 8)}{total_duration_s:.1f}s")
 
         # Print each modality
-        for name, (start_ns, end_ns) in modalities.items():
+        for name, (start_ns, end_ns, count) in modalities.items():
             # Calculate relative positions (0 to 1)
             rel_start = (start_ns - global_min) / total_duration_ns
             rel_end = (end_ns - global_min) / total_duration_ns
@@ -635,7 +646,7 @@ class AriaLoader:
             start_s = (start_ns - global_min) / 1e9
             end_s = (end_ns - global_min) / 1e9
 
-            print(f"{name:<{label_width}} |{bar}|  {start_s:.1f} - {end_s:.1f}s")
+            print(f"{labels[name]:<{label_width}}|{bar}|  {start_s:.1f} - {end_s:.1f}s")
 
         # Print restricted range marker if provided
         if restricted_range is not None:
@@ -661,7 +672,7 @@ class AriaLoader:
             start_s = (restrict_start_ns - global_min) / 1e9
             end_s = (restrict_end_ns - global_min) / 1e9
             print(
-                f"{'sampled':<{label_width}} |{marker_str}|  {start_s:.1f} - {end_s:.1f}s"
+                f"{'sampled':<{label_width}}|{marker_str}|  {start_s:.1f} - {end_s:.1f}s"
             )
 
         print()
@@ -805,12 +816,6 @@ class AriaLoader:
                 expected_cy_orig = (calib_h - 1) / 2.0
                 actual_cx_orig = cam.c[0].item()
                 actual_cy_orig = cam.c[1].item()
-                print(
-                    f"==> Calibration size: {calib_w:.0f}x{calib_h:.0f}, VRS size: {WW}x{HH}"
-                )
-                print(
-                    f"==> Principal point (before resize): expected=({expected_cx_orig:.1f}, {expected_cy_orig:.1f}), actual=({actual_cx_orig:.1f}, {actual_cy_orig:.1f})"
-                )
             # First scale camera from calibration size to actual VRS image size
             cam = cam.scale_to_size((WW, HH))
             # Then scale to resize size if specified
@@ -822,9 +827,13 @@ class AriaLoader:
                 expected_cy = (resizeH - 1) / 2.0
                 actual_cx = cam.c[0].item()
                 actual_cy = cam.c[1].item()
-                print(
-                    f"==> Principal point (after resize to {resizeW}x{resizeH}): expected=({expected_cx:.1f}, {expected_cy:.1f}), actual=({actual_cx:.1f}, {actual_cy:.1f})"
-                )
+                pp_thresh = 0.02 * max(resizeW, resizeH)
+                if abs(actual_cx - expected_cx) > pp_thresh or abs(actual_cy - expected_cy) > pp_thresh:
+                    print(
+                        f"==> Warning: Principal point is off-center. "
+                        f"Before resize: expected=({expected_cx_orig:.1f}, {expected_cy_orig:.1f}), actual=({actual_cx_orig:.1f}, {actual_cy_orig:.1f}). "
+                        f"After resize to {resizeW}x{resizeH}: expected=({expected_cx:.1f}, {expected_cy:.1f}), actual=({actual_cx:.1f}, {actual_cy:.1f})"
+                    )
         cam = cam.float()
         if rotated and self.unrotate:
             output["pinhole_cam_prerot"] = cam.clone()

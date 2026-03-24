@@ -1,4 +1,8 @@
 # pyre-unsafe
+import os
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import torch
 from transformers import Owlv2ForObjectDetection, Owlv2Processor
 from utils.taxonomy import load_text_labels
@@ -31,7 +35,7 @@ class OwlWrapper(torch.nn.Module):
 
         model_name = f"google/{model_name}"
 
-        processor = Owlv2Processor.from_pretrained(model_name)
+        processor = Owlv2Processor.from_pretrained(model_name, use_fast=True)
         model = Owlv2ForObjectDetection.from_pretrained(model_name).eval()
 
         model.to(device)
