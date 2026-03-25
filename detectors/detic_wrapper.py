@@ -79,8 +79,15 @@ class DeticWrapper(nn.Module):
         )
 
         # Load class ID to name mapping
-        self.class_id_name_map = self._load_class_mapping(base_dir)
+        self.class_id_name_map = self._load_class_mapping()
         print(f"Loaded {len(self.class_id_name_map)} classes")
+
+        if self.selected_classes:
+            known_classes = set(self.class_id_name_map.values())
+            unknown = self.selected_classes - known_classes
+            if unknown:
+                print(f"WARNING: {len(unknown)} label(s) not in Detic vocabulary: {sorted(unknown)}")
+                print("Consider using --detector owl for open-vocabulary detection.")
 
         # Load JIT model
         model_path = os.path.join(base_dir, f"detic_{model_width}x{model_height}-1.pt")
@@ -93,25 +100,22 @@ class DeticWrapper(nn.Module):
         # Warmup the model
         self._warmup_model(warmup_steps=5)
 
-    def _load_class_mapping(self, base_dir: str) -> Dict[int, str]:
+    def _load_class_mapping(self) -> Dict[int, str]:
         """
-        Load class ID to name mapping from CSV file.
-
-        Args:
-            base_dir: Local directory containing DETIC model files
+        Load class ID to name mapping from CSV file bundled in the repo.
 
         Returns:
             Dictionary mapping class index to class name
         """
-        local_classes_path = os.path.join(base_dir, "detic_classes.csv")
+        local_classes_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "lvis_classes.csv"
+        )
 
         class_map = {}
         with open(local_classes_path, "r") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                class_idx = int(row["Class Index"])
-                class_name = row["Class Name"]
-                class_map[class_idx] = class_name
+                class_map[int(row["Class Index"])] = row["Class Name"]
 
         return class_map
 

@@ -4,8 +4,8 @@
 import os
 from typing import List, Union
 
-# Directory containing label files (same directory as this module)
-_LABELS_DIR = os.path.dirname(os.path.abspath(__file__))
+# Directory containing label files (detectors/ directory, sibling of utils/)
+_LABELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "detectors")
 
 
 def load_text_labels(
@@ -27,7 +27,7 @@ def load_text_labels(
         label_list = [label_list]
 
     first_label = label_list[0]
-    txt_path = os.path.join(_LABELS_DIR, f"{first_label}_labels.txt")
+    txt_path = os.path.join(_LABELS_DIR, f"{first_label}_classes.csv")
     if not os.path.exists(txt_path):
         return label_list
 

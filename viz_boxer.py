@@ -26,30 +26,52 @@ import moderngl
 import moderngl_window as mglw
 import numpy as np
 from pyrr import Matrix44
-from surreal.fov3d.scripts.viz_common import (
-    load_timed_obbs_csv,
-    maybe_download_from_fed,
-    resolve_and_load_view,
-    resolve_root_and_csv,
-)
-from surreal.fov3d.utils.ca_loader import CALoader
-from surreal.fov3d.utils.camera import CameraTW
-from surreal.fov3d.utils.file_io import (
+from loaders.aria_loader import AriaLoader
+from loaders.ca_loader import CALoader
+from loaders.scannet_loader import ScanNetLoader
+from utils.camera import CameraTW
+from utils.file_io import (
     dump_obbs_adt,
     load_bb2d_csv,
     load_obbs_adt,
     probe_gravity_direction,
     read_obb_csv,
 )
-from surreal.fov3d.utils.obb import BB3D_LINE_ORDERS, ObbTW
-from surreal.fov3d.utils.orbit_viewer import OrbitViewer
-from surreal.fov3d.utils.pose import PoseTW
-from surreal.fov3d.utils.scannet_loader import ScanNetLoader
-from surreal.fov3d.utils.sst_loader import SSTLoader
-from surreal.fov3d.utils.taxonomy import BOXY_SEM2NAME, SSI_COLORS_ALT, TEXT2COLORS
-from surreal.fov3d.utils.tensor_utils import find_nearest2
-from surreal.fov3d.utils.track_3d_boxes import BoundingBox3DTracker
-from surreal.fov3d.utils.video import make_mp4
+from utils.obb import BB3D_LINE_ORDERS, ObbTW
+from utils.orbit_viewer import OrbitViewer
+from utils.pose import PoseTW
+from utils.taxonomy import BOXY_SEM2NAME, SSI_COLORS_ALT, TEXT2COLORS
+from utils.tensor_utils import find_nearest2
+from utils.track_3d_boxes import BoundingBox3DTracker
+from utils.video import make_mp4
+
+
+def resolve_root_and_csv(seq_name: str, csv_name: str, root_dir: str = "") -> Tuple[str, str]:
+    """Resolve root data directory and CSV path for a sequence."""
+    if not root_dir:
+        root_dir = os.path.join(os.path.expanduser("~"), "viz_boxer")
+    root_path = os.path.join(root_dir, seq_name)
+    csv_path = os.path.join(root_path, csv_name)
+    return root_path, csv_path
+
+
+def resolve_and_load_view(
+    root_path: str, load_view: Optional[str]
+) -> Tuple[str, Optional[dict]]:
+    """Resolve view save path and optionally load saved camera state."""
+    view_path = os.path.join(root_path, "camera_view.pt")
+    if load_view is None:
+        return view_path, None
+    if load_view == "DEFAULT":
+        target = view_path
+    else:
+        target = load_view
+    if os.path.exists(target):
+        data = torch.load(target, weights_only=False)
+        print(f"Loaded camera view from {target}")
+        return view_path, data
+    print(f"No saved view at {target}")
+    return view_path, None
 
 # Color mode constants
 COLOR_MODE_SEMANTIC = 0
@@ -113,7 +135,7 @@ def _load_sequence_context_auto(
     start_frame: int = 0,
     max_frames: int = 0,
 ) -> dict[str, Any]:
-    """Load sequence context via SSTLoader (default), CALoader, or ScanNetLoader.
+    """Load sequence context via AriaLoader (default), CALoader, or ScanNetLoader.
 
     CA1M always uses pinhole mode in this viewer.
     """
@@ -244,14 +266,14 @@ def _load_sequence_context_auto(
         )
         return data
 
-    # Default path: SSTLoader for boxy_data / VRS sequences.
-    t_sst0 = time_module.perf_counter()
+    # Default path: AriaLoader for boxy_data / VRS sequences.
+    t_aria0 = time_module.perf_counter()
     root = os.path.join(os.path.expanduser("~"), "boxy_data", seq_name)
-    # IMPORTANT: don't cap SST by detection-frame count; CSV timestamps can be
+    # IMPORTANT: don't cap by detection-frame count; CSV timestamps can be
     # sparse over long recordings, and truncating the RGB timeline can misalign
     # image/pose lookup.
-    sst_max_frames = 1_000_000
-    sst = SSTLoader(
+    loader_max_frames = 1_000_000
+    loader = AriaLoader(
         remote_root=root,
         camera="rgb",
         with_img=True,
@@ -259,38 +281,38 @@ def _load_sequence_context_auto(
         with_sdp=with_sdp,
         with_obb=False,
         restrict_range=False,
-        max_n=sst_max_frames,
+        max_n=loader_max_frames,
         skip_n=1,
         start_n=max(0, int(start_frame)),
     )
-    rgb_stream_id = sst.stream_id[0]
-    rgb_num_frames = sst.provider.get_num_data(rgb_stream_id)
+    rgb_stream_id = loader.stream_id[0]
+    rgb_num_frames = loader.provider.get_num_data(rgb_stream_id)
     if rgb_num_frames <= 0:
-        raise RuntimeError(f"SSTLoader returned 0 frames for {seq_name}")
+        raise RuntimeError(f"AriaLoader returned 0 frames for {seq_name}")
     # Keep startup fast: don't scan all frame timestamps here.
-    # For SST RGB fetch we resolve frame index on-demand via _find_frame_by_timestamp.
+    # For Aria RGB fetch we resolve frame index on-demand via _find_frame_by_timestamp.
     rgb_timestamps = (
-        np.array(sst.pose_ts, dtype=np.int64)
-        if getattr(sst, "pose_ts", None) is not None and len(sst.pose_ts) > 0
+        np.array(loader.pose_ts, dtype=np.int64)
+        if getattr(loader, "pose_ts", None) is not None and len(loader.pose_ts) > 0
         else np.array([0], dtype=np.int64)
     )
     data: dict[str, Any] = {
-        "source": "sst",
-        "sst": sst,
+        "source": "aria",
+        "aria": loader,
         "rgb_num_frames": rgb_num_frames,
         "rgb_timestamps": rgb_timestamps,
-        "rgb_images": None,  # lazy-loaded from sst_img_loader
-        "is_nebula": bool(sst.is_nebula),
-        "traj": sst.traj,
-        "pose_ts": sst.pose_ts,
-        "calibs": sst.calibs[0],  # camera='rgb'
-        "calib_ts": sst.calib_ts,
+        "rgb_images": None,  # lazy-loaded from aria img loader
+        "is_nebula": bool(loader.is_nebula),
+        "traj": loader.traj,
+        "pose_ts": loader.pose_ts,
+        "calibs": loader.calibs[0],  # camera='rgb'
+        "calib_ts": loader.calib_ts,
     }
     if with_sdp:
-        data["time_to_uids_slaml"] = getattr(sst, "time_to_uids_slaml", None)
-        data["time_to_uids_slamr"] = getattr(sst, "time_to_uids_slamr", None)
-        data["uid_to_p3"] = getattr(sst, "uid_to_p3", None)
-    _startup_log(f"Context ready (SST) in {(time_module.perf_counter() - t_sst0):.2f}s")
+        data["time_to_uids_slaml"] = getattr(loader, "time_to_uids_slaml", None)
+        data["time_to_uids_slamr"] = getattr(loader, "time_to_uids_slamr", None)
+        data["uid_to_p3"] = getattr(loader, "uid_to_p3", None)
+    _startup_log(f"Context ready (Aria) in {(time_module.perf_counter() - t_aria0):.2f}s")
     return data
 
 
@@ -582,7 +604,7 @@ class OBBViewer(OrbitViewer):
         self._rgb_tex_size = (0, 0)
         self.show_rgb = True
         if not hasattr(self, "_data_source"):
-            self._data_source = "ca1m" if seq_name.startswith("ca1m") else "sst"
+            self._data_source = "ca1m" if seq_name.startswith("ca1m") else "aria"
         if not hasattr(self, "_scannet_scene_dir"):
             self._scannet_scene_dir: Optional[str] = None
         if not hasattr(self, "_scannet_frame_ids"):
@@ -661,7 +683,7 @@ class OBBViewer(OrbitViewer):
         # (needed because init_scene() -> _build_geometry_cache() uses embeddings)
         self._skip_precompute = skip_precompute
         if not skip_precompute:
-            from surreal.fov3d.utils.fuse_3d_boxes import precompute_semantic_embeddings
+            from utils.fuse_3d_boxes import precompute_semantic_embeddings
 
             self._semantic_embeddings = precompute_semantic_embeddings(self.all_obbs)
         else:
@@ -697,11 +719,11 @@ class OBBViewer(OrbitViewer):
                         else self.total_frames
                     ),
                 )
-                self._data_source = seq_ctx.get("source", "sst")
+                self._data_source = seq_ctx.get("source", "aria")
                 source_name = {
                     "ca1m": "CALoader",
                     "scannet": "ScanNetLoader",
-                }.get(self._data_source, "SSTLoader")
+                }.get(self._data_source, "AriaLoader")
                 print("Data source: " + source_name)
                 self._ca_loader = seq_ctx.get("ca_loader", None)
                 self._scannet_scene_dir = seq_ctx.get("scannet_scene_dir", None)
@@ -722,7 +744,7 @@ class OBBViewer(OrbitViewer):
                     f"OBBViewer sequence context applied in {(time_module.perf_counter() - t_ctx0):.2f}s"
                 )
             except Exception as e:
-                print(f"Warning: failed to initialize RGB panel via SSTLoader: {e}")
+                print(f"Warning: failed to initialize RGB panel via AriaLoader: {e}")
                 self._rgb_images = None
         if self.show_rgb and self._rgb_texture is None and self.total_frames > 0:
             ts0 = self.sorted_timestamps[0]
@@ -1170,7 +1192,7 @@ class OBBViewer(OrbitViewer):
 
         # Create fuser with UI-controlled config
         # NOTE: Set conf_threshold=0.0 because we already filtered via _get_filtered_obbs()
-        from surreal.fov3d.utils.fuse_3d_boxes import BoundingBox3DFuser
+        from utils.fuse_3d_boxes import BoundingBox3DFuser
 
         fuser = BoundingBox3DFuser(
             iou_threshold=self.fusion_iou_threshold,
@@ -1238,7 +1260,7 @@ class OBBViewer(OrbitViewer):
         elif self.color_mode == COLOR_MODE_PCA:
             # Fused instances are new OBBs not in original cache, so compute embeddings directly
             # Use standalone function to compute embeddings
-            from surreal.fov3d.utils.fuse_3d_boxes import precompute_semantic_embeddings
+            from utils.fuse_3d_boxes import precompute_semantic_embeddings
 
             embeddings = precompute_semantic_embeddings(tracked_all_obbs)
             # Use cached PCA model for consistent colors with raw detections
@@ -1537,7 +1559,7 @@ class OBBViewer(OrbitViewer):
         embeddings = self._get_semantic_embeddings(self.all_obbs)
 
         # Encode BOXY_SEM2NAME values using a local model instance
-        from surreal.fov3d.utils.condense_text import SentenceTransformerWrapper
+        from utils.condense_text import SentenceTransformerWrapper
 
         model = SentenceTransformerWrapper()
 
@@ -1709,10 +1731,10 @@ class OBBViewer(OrbitViewer):
 
         if (
             len(self._rgb_timestamps) == 0
-            and getattr(self, "_data_source", None) != "sst"
+            and getattr(self, "_data_source", None) != "aria"
         ):
             return None
-        if getattr(self, "_data_source", None) == "sst":
+        if getattr(self, "_data_source", None) == "aria":
             if len(self._rgb_timestamps) > 0:
                 idx = int(find_nearest2(self._rgb_timestamps, ts_ns))
                 ts_key = int(self._rgb_timestamps[idx])
@@ -1729,14 +1751,16 @@ class OBBViewer(OrbitViewer):
             img = self._rgb_lru_cache[ts_key]
             self._rgb_lru_cache.move_to_end(ts_key)
         elif (
-            getattr(self, "_data_source", None) == "sst"
-            and self._sst_loader is not None
+            getattr(self, "_data_source", None) == "aria"
+            and self._aria_loader is not None
         ):
-            frame_idx = int(self._sst_loader._find_frame_by_timestamp(int(ts_ns)))
-            out = self._sst_loader.load(frame_idx)
-            if out is False or "img0" not in out:
+            frame_idx = int(self._aria_loader._find_frame_by_timestamp(int(ts_ns)))
+            stream_id = self._aria_loader.stream_id[0]
+            calibs = self._aria_loader.calibs[0]
+            out = self._aria_loader._single(frame_idx, stream_id, calibs)
+            if out is False or "img" not in out:
                 return None
-            img_t = out["img0"][0].permute(1, 2, 0).cpu().numpy()
+            img_t = out["img"][0].permute(1, 2, 0).cpu().numpy()
             img = np.clip(img_t * 255.0, 0, 255).astype(np.uint8)
             self._rgb_lru_cache[ts_key] = img
             if len(self._rgb_lru_cache) > self._rgb_lru_max_items:
@@ -2117,7 +2141,7 @@ class OBBViewer(OrbitViewer):
         pts_cam = T_world_cam.inverse().transform(pts_world)
         # Scale camera to match actual VRS image resolution if they differ.
         # The raw calibrations from load_online_calib may be at a different
-        # resolution than the VRS image (SSTLoader._single handles this
+        # resolution than the VRS image (AriaLoader._single handles this
         # internally, but self.calibs stores the un-scaled originals).
         proj_cam = cam
         if self._rgb_vrs_w > 0 and self._rgb_vrs_h > 0:
@@ -3144,7 +3168,7 @@ class TrackerViewer(OBBViewer):
             verbose=self.tracker_verbose,
         )
 
-        # Load trajectory/calibration/RGB from SSTLoader
+        # Load trajectory/calibration/RGB from AriaLoader
         seq_name = os.path.basename(root_path)
         self._seq_name = seq_name
         self.scannet_scene = scannet_scene
@@ -3197,13 +3221,13 @@ class TrackerViewer(OBBViewer):
                     else self.total_frames
                 ),
             )
-            self._data_source = seq_ctx.get("source", "sst")
+            self._data_source = seq_ctx.get("source", "aria")
             source_name = {
                 "ca1m": "CALoader",
                 "scannet": "ScanNetLoader",
-            }.get(self._data_source, "SSTLoader")
+            }.get(self._data_source, "AriaLoader")
             print("Data source: " + source_name)
-            self._sst_loader = seq_ctx.get("sst", None)
+            self._aria_loader = seq_ctx.get("aria", None)
             self._ca_loader = seq_ctx.get("ca_loader", None)
             self._scannet_loader = seq_ctx.get("scannet_loader", None)
             self._scannet_scene_dir = seq_ctx.get("scannet_scene_dir", None)
@@ -3216,9 +3240,9 @@ class TrackerViewer(OBBViewer):
             self.pose_ts = seq_ctx["pose_ts"]
             self.calibs = seq_ctx["calibs"]
             self.calib_ts = seq_ctx["calib_ts"]
-            if self._sst_loader is not None:
+            if self._aria_loader is not None:
                 print(
-                    f"Loaded VRS with {self._rgb_num_frames} RGB frames from {self._sst_loader.vrs_path}"
+                    f"Loaded VRS with {self._rgb_num_frames} RGB frames from {self._aria_loader.vrs_path}"
                 )
             elif self._data_source == "scannet":
                 print(
@@ -3229,15 +3253,15 @@ class TrackerViewer(OBBViewer):
                     f"Loaded CA1M with {self._rgb_num_frames} RGB frames from {seq_name}"
                 )
             print(
-                f"Loaded trajectory with {len(self.traj) if self.traj is not None else 0} poses via SSTLoader"
+                f"Loaded trajectory with {len(self.traj) if self.traj is not None else 0} poses via AriaLoader"
             )
             print(
-                f"Loaded online calibration with {len(self.calibs) if self.calibs is not None else 0} entries via SSTLoader"
+                f"Loaded online calibration with {len(self.calibs) if self.calibs is not None else 0} entries via AriaLoader"
             )
-            # Optional semidense maps from SSTLoader
-            self._sst_uid_to_p3 = seq_ctx.get("uid_to_p3", None)
-            self._sst_time_to_uids_slaml = seq_ctx.get("time_to_uids_slaml", None)
-            self._sst_time_to_uids_slamr = seq_ctx.get("time_to_uids_slamr", None)
+            # Optional semidense maps from AriaLoader
+            self._aria_uid_to_p3 = seq_ctx.get("uid_to_p3", None)
+            self._aria_time_to_uids_slaml = seq_ctx.get("time_to_uids_slaml", None)
+            self._aria_time_to_uids_slamr = seq_ctx.get("time_to_uids_slamr", None)
             if self._record_fps <= 0.0:
                 self._record_fps = _infer_fps_from_timestamps_ns(
                     self._rgb_timestamps,
@@ -3259,9 +3283,9 @@ class TrackerViewer(OBBViewer):
             self.pose_ts = np.array([])
             self.calibs = None
             self.calib_ts = np.array([])
-            self._sst_uid_to_p3 = None
-            self._sst_time_to_uids_slaml = None
-            self._sst_time_to_uids_slamr = None
+            self._aria_uid_to_p3 = None
+            self._aria_time_to_uids_slaml = None
+            self._aria_time_to_uids_slamr = None
             if self._record_fps <= 0.0:
                 self._record_fps = _infer_fps_from_timestamps_ns(
                     np.array(self.sorted_timestamps, dtype=np.int64),
@@ -3271,7 +3295,7 @@ class TrackerViewer(OBBViewer):
                 print(f"[REC] Auto-detected CSV FPS: {self._record_fps:.1f}")
             else:
                 print(f"[REC] Using user-specified record FPS: {self._record_fps:.1f}")
-            print(f"Failed to initialize SSTLoader for {seq_name}: {e}")
+            print(f"Failed to initialize AriaLoader for {seq_name}: {e}")
 
         # Load 2D bounding box CSV for BB2 comparison panel
         self._bb2d_data: Optional[Dict[int, dict]] = None
@@ -3466,7 +3490,7 @@ class TrackerViewer(OBBViewer):
             all_tracked = []
             for ts in tracked_timed:
                 all_tracked.extend(tracked_timed[ts])
-            from surreal.fov3d.utils.track_3d_boxes import TrackedInstance, TrackState
+            from utils.track_3d_boxes import TrackedInstance, TrackState
 
             self.tracker.tracks = []
             for i, obb in enumerate(all_tracked):
@@ -3660,10 +3684,10 @@ class TrackerViewer(OBBViewer):
             print(f"Loaded {self.point_count} semidense points from CALoader.sdp_ws")
             return
 
-        # Prefer semidense from SSTLoader context only.
-        time_to_uids_slaml = getattr(self, "_sst_time_to_uids_slaml", None)
-        time_to_uids_slamr = getattr(self, "_sst_time_to_uids_slamr", None)
-        uid_to_p3 = getattr(self, "_sst_uid_to_p3", None)
+        # Prefer semidense from AriaLoader context only.
+        time_to_uids_slaml = getattr(self, "_aria_time_to_uids_slaml", None)
+        time_to_uids_slamr = getattr(self, "_aria_time_to_uids_slamr", None)
+        uid_to_p3 = getattr(self, "_aria_uid_to_p3", None)
 
         if (
             time_to_uids_slaml is None
@@ -3984,8 +4008,8 @@ class TrackerViewer(OBBViewer):
     @staticmethod
     def _init_boxy_ref_data() -> dict:
         """Load sentence transformer model and precompute reference embeddings."""
-        from surreal.fov3d.utils.condense_text import SentenceTransformerWrapper
-        from surreal.fov3d.utils.taxonomy import (
+        from utils.condense_text import SentenceTransformerWrapper
+        from utils.taxonomy import (
             BOXY_SEM2NAME,
             SSI_COLORS_ALT,
             TEXT2COLORS,
@@ -5685,7 +5709,7 @@ def _load_timed_obbs(args: argparse.Namespace, root_path: str, csv_path: str):
         return {ts: timed_obbs_in[ts] for ts in sorted_ts}
 
     if args.fuse and args.adt_dir:
-        from surreal.fov3d.utils.sst_loader import get_T_zup_yup
+        from loaders.aria_loader import get_T_zup_yup
 
         timed_obbs = load_obbs_adt(args.adt_dir, only_3d=True)
         print(f"Loaded {len(timed_obbs)} frames from ADT dir {args.adt_dir}")
@@ -5710,12 +5734,7 @@ def _load_timed_obbs(args: argparse.Namespace, root_path: str, csv_path: str):
         return timed_obbs
 
     bb2d_path = os.path.join(root_path, args.bb2d_csv)
-    maybe_download_from_fed(csv_path=csv_path, fed=args.fed, bb2d_csv_path=bb2d_path)
-    timed_obbs = load_timed_obbs_csv(
-        csv_path=csv_path,
-        force_anything=args.force_anything,
-        max_n=0,
-    )
+    timed_obbs = read_obb_csv(csv_path)
     timed_obbs = _slice_timed_obbs_start_max(timed_obbs, args.start_n, args.max_n)
     return _subsample_timed_obbs_by_skip_n(timed_obbs, args.skip_n)
 
@@ -5737,8 +5756,8 @@ def main() -> None:
 
     # Common args
     parser.add_argument("--seq", type=str, default="sor01")
+    parser.add_argument("--root_dir", type=str, default="", help="Root directory for sequence data (default: ~/viz_boxer)")
     parser.add_argument("--csv", type=str, default="boxer_3dbbs.csv")
-    parser.add_argument("--fed", action="store_true")
     parser.add_argument("--force_anything", action="store_true")
     parser.add_argument(
         "--load_view", type=str, nargs="?", const="DEFAULT", default=None
@@ -5846,7 +5865,7 @@ def main() -> None:
         if args.scannet_scene is not None
         else args.seq
     )
-    root_path, csv_path = resolve_root_and_csv(effective_seq, args.csv)
+    root_path, csv_path = resolve_root_and_csv(effective_seq, args.csv, args.root_dir)
     timed_obbs = _load_timed_obbs(args, root_path, csv_path)
     print(
         f"Effective OBB range: start_n={args.start_n}, "
