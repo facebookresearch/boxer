@@ -59,7 +59,10 @@ def _suppress_stderr():
         os.close(old_stderr)
 
 
-class AriaLoader:
+from loaders.base_loader import BaseLoader
+
+
+class AriaLoader(BaseLoader):
     def __init__(
         self,
         remote_root,

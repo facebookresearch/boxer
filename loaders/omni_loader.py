@@ -163,7 +163,10 @@ def corners_to_obb(
     return obb
 
 
-class OmniLoader:
+from loaders.base_loader import BaseLoader
+
+
+class OmniLoader(BaseLoader):
     """
     Data loader for Omni3D dataset images and 3D bounding boxes.
     Returns datum in the same format as CALoader for use with demo_boxer.py.

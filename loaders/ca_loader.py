@@ -454,7 +454,10 @@ def _load_tar(
     return out
 
 
-class CALoader:
+from loaders.base_loader import BaseLoader
+
+
+class CALoader(BaseLoader):
     def __init__(
         self,
         seq_name,

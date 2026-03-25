@@ -86,7 +86,10 @@ def _make_M_from_tqs(t, q, s):
     return M
 
 
-class ScanNetLoader:
+from loaders.base_loader import BaseLoader
+
+
+class ScanNetLoader(BaseLoader):
     """
     Data loader for ScanNet scenes with Scan2CAD annotations.
 

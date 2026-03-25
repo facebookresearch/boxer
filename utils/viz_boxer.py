@@ -16,9 +16,11 @@ from typing import Any, Dict, Optional, Tuple
 import cv2
 import torch
 
-# NOTE(dd): Important to keep to have argparse working correctly.
-original_argv = sys.argv.copy()
-sys.argv = [sys.argv[0]]
+# NOTE(dd): When run as main script, prevent moderngl-window from consuming
+# argparse flags intended for viz_boxer's own parser.
+if __name__ == "__main__":
+    original_argv = sys.argv.copy()
+    sys.argv = [sys.argv[0]]
 
 import imgui
 import matplotlib.cm as cm
@@ -45,33 +47,6 @@ from utils.tensor_utils import find_nearest2
 from utils.track_3d_boxes import BoundingBox3DTracker
 from utils.video import make_mp4
 
-
-def resolve_root_and_csv(seq_name: str, csv_name: str, root_dir: str = "") -> Tuple[str, str]:
-    """Resolve root data directory and CSV path for a sequence."""
-    if not root_dir:
-        root_dir = os.path.join(os.path.expanduser("~"), "viz_boxer")
-    root_path = os.path.join(root_dir, seq_name)
-    csv_path = os.path.join(root_path, csv_name)
-    return root_path, csv_path
-
-
-def resolve_and_load_view(
-    root_path: str, load_view: Optional[str]
-) -> Tuple[str, Optional[dict]]:
-    """Resolve view save path and optionally load saved camera state."""
-    view_path = os.path.join(root_path, "camera_view.pt")
-    if load_view is None:
-        return view_path, None
-    if load_view == "DEFAULT":
-        target = view_path
-    else:
-        target = load_view
-    if os.path.exists(target):
-        data = torch.load(target, weights_only=False)
-        print(f"Loaded camera view from {target}")
-        return view_path, data
-    print(f"No saved view at {target}")
-    return view_path, None
 
 # Color mode constants
 COLOR_MODE_SEMANTIC = 0
@@ -205,7 +180,7 @@ def _load_sequence_context_auto(
         )
         data = {
             "source": "scannet",
-            "scannet_loader": loader,
+            "loader": loader,
             "scannet_scene_dir": loader.scene_dir,
             "scannet_frame_ids": list(frame_ids),
             "rgb_num_frames": len(frame_ids),
@@ -255,7 +230,7 @@ def _load_sequence_context_auto(
             "pose_ts": rgb_timestamps,
             "calibs": ca.cams,
             "calib_ts": rgb_timestamps,
-            "ca_loader": ca,
+            "loader": ca,
         }
         if with_sdp:
             data["time_to_uids_slaml"] = None
@@ -298,7 +273,7 @@ def _load_sequence_context_auto(
     )
     data: dict[str, Any] = {
         "source": "aria",
-        "aria": loader,
+        "loader": loader,
         "rgb_num_frames": rgb_num_frames,
         "rgb_timestamps": rgb_timestamps,
         "rgb_images": None,  # lazy-loaded from aria img loader
@@ -467,6 +442,7 @@ class OBBViewer(OrbitViewer):
         seq_name: str = "",
         scannet_scene: str | None = None,
         scannet_annotation_path: str = "~/data/scannet/full_annotations.json",
+        seq_ctx: dict | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize viewer with a single ObbTW tensor containing all detections.
@@ -479,7 +455,10 @@ class OBBViewer(OrbitViewer):
                 per frame and doesn't need embeddings at startup.
             load_view_data: Optional dict with saved camera state to restore
             view_save_path: Path to save camera view .pt files
+            seq_ctx: Pre-built sequence context dict. When provided, skips
+                _load_sequence_context_auto() and uses this context directly.
         """
+        self._prebuilt_seq_ctx = seq_ctx
         t_init0 = time_module.perf_counter()
         _startup_log(f"OBBViewer init start (seq={seq_name})")
         self.all_obbs = all_obbs  # Single ObbTW tensor with all detections
@@ -611,8 +590,8 @@ class OBBViewer(OrbitViewer):
             self._scannet_frame_ids: Optional[list[str]] = None
         self._rgb_lru_cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._rgb_lru_max_items = 32
-        if not hasattr(self, "_ca_loader"):
-            self._ca_loader = None
+        if not hasattr(self, "_loader"):
+            self._loader = None
         self._rgb_img_scale: float = 1.0
         self._rgb_vrs_h: int = 0
         self._rgb_vrs_w: int = 0
@@ -707,25 +686,28 @@ class OBBViewer(OrbitViewer):
         if self.total_frames > 0 and not has_preloaded_context:
             try:
                 t_ctx0 = time_module.perf_counter()
-                seq_ctx = _load_sequence_context_auto(
-                    seq_name=seq_name,
-                    scannet_scene=self.scannet_scene,
-                    scannet_annotation_path=self.scannet_annotation_path,
-                    with_sdp=False,
-                    start_frame=max(0, self._loader_start_frame),
-                    max_frames=(
-                        self._loader_max_frames
-                        if self._loader_max_frames > 0
-                        else self.total_frames
-                    ),
-                )
+                if self._prebuilt_seq_ctx is not None:
+                    seq_ctx = self._prebuilt_seq_ctx
+                else:
+                    seq_ctx = _load_sequence_context_auto(
+                        seq_name=seq_name,
+                        scannet_scene=self.scannet_scene,
+                        scannet_annotation_path=self.scannet_annotation_path,
+                        with_sdp=False,
+                        start_frame=max(0, self._loader_start_frame),
+                        max_frames=(
+                            self._loader_max_frames
+                            if self._loader_max_frames > 0
+                            else self.total_frames
+                        ),
+                    )
                 self._data_source = seq_ctx.get("source", "aria")
                 source_name = {
                     "ca1m": "CALoader",
                     "scannet": "ScanNetLoader",
                 }.get(self._data_source, "AriaLoader")
                 print("Data source: " + source_name)
-                self._ca_loader = seq_ctx.get("ca_loader", None)
+                self._loader = seq_ctx.get("loader", None)
                 self._scannet_scene_dir = seq_ctx.get("scannet_scene_dir", None)
                 self._rgb_num_frames = seq_ctx["rgb_num_frames"]
                 self._rgb_timestamps = seq_ctx["rgb_timestamps"]
@@ -862,6 +844,10 @@ class OBBViewer(OrbitViewer):
                 sat = max(sat, 0.82)
         r, g, b = colorsys.hsv_to_rgb(float(hue), float(sat), float(val))
         return np.array([r, g, b], dtype=np.float32)
+
+    def _remap_label(self, label: str) -> str:
+        """Apply display-name overrides. Subclasses may extend."""
+        return label
 
     def _obbs_random_colors(self, obbs: ObbTW) -> torch.Tensor:
         """Theme-aware random colors per semantic class (stable across instances)."""
@@ -1752,12 +1738,12 @@ class OBBViewer(OrbitViewer):
             self._rgb_lru_cache.move_to_end(ts_key)
         elif (
             getattr(self, "_data_source", None) == "aria"
-            and self._aria_loader is not None
+            and self._loader is not None
         ):
-            frame_idx = int(self._aria_loader._find_frame_by_timestamp(int(ts_ns)))
-            stream_id = self._aria_loader.stream_id[0]
-            calibs = self._aria_loader.calibs[0]
-            out = self._aria_loader._single(frame_idx, stream_id, calibs)
+            frame_idx = int(self._loader._find_frame_by_timestamp(int(ts_ns)))
+            stream_id = self._loader.stream_id[0]
+            calibs = self._loader.calibs[0]
+            out = self._loader._single(frame_idx, stream_id, calibs)
             if out is False or "img" not in out:
                 return None
             img_t = out["img"][0].permute(1, 2, 0).cpu().numpy()
@@ -2791,6 +2777,142 @@ class OBBViewer(OrbitViewer):
         imgui.text(title)
         imgui.separator()
 
+    def _render_fusion_controls(self) -> None:
+        """Render fusion section UI (reusable by both OBBViewer and TrackerViewer)."""
+        self._section_header("Fusion")
+
+        # Check if fusion parameters are out of date
+        fusion_out_of_date = (
+            self._last_fusion_iou_threshold != self.fusion_iou_threshold
+            or self._last_fusion_min_detections != self.fusion_min_detections
+            or self._last_fusion_confidence_weighting
+            != self.fusion_confidence_weighting
+            or self._last_fusion_samp_per_dim != self.fusion_samp_per_dim
+            or self._last_fusion_semantic_threshold != self.fusion_semantic_threshold
+            or self._last_fusion_enable_nms != self.fusion_enable_nms
+            or self._last_fusion_nms_iou_threshold != self.fusion_nms_iou_threshold
+            or self._last_fusion_prob_threshold
+            != self.prob_threshold
+        )
+
+        button_label = (
+            "RUN FUSION (out of date)" if fusion_out_of_date else "RUN FUSION"
+        )
+        button_width = 400
+        button_height = 40
+        if fusion_out_of_date:
+            imgui.push_style_color(imgui.COLOR_BUTTON, 0.7, 0.15, 0.15, 1.0)
+            imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.85, 0.2, 0.2, 1.0)
+            imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 0.5, 0.1, 0.1, 1.0)
+        if imgui.button(button_label, width=button_width, height=button_height):
+            self._run_fusion()
+            self._rgb_tracked_all_cache_epoch += 1
+            self._rgb_tracked_all_color_cache = None
+            self._rgb_tracked_all_color_mode_cache = None
+            self._rebuild_rgb_projections()
+        if fusion_out_of_date:
+            imgui.pop_style_color(3)
+
+        imgui.separator()
+
+        imgui.push_item_width(200)
+        prob_changed, new_prob = imgui.slider_float(
+            "3DBB Conf Thresh", self.prob_threshold, 0.0, 1.0
+        )
+        if prob_changed:
+            self.prob_threshold = new_prob
+            self._cached_filtered_obbs = None
+        imgui.pop_item_width()
+
+        imgui.push_item_width(200)
+        _changed, self.fusion_semantic_threshold = imgui.slider_float(
+            "Semantic Merge Thresh", self.fusion_semantic_threshold, 0.0, 1.0
+        )
+        imgui.pop_item_width()
+
+        imgui.separator()
+
+        if self.fusion_enable_nms:
+            imgui.push_item_width(200)
+            _changed, self.fusion_nms_iou_threshold = imgui.slider_float(
+                "NMS IoU Thresh", self.fusion_nms_iou_threshold, 0.5, 1.0
+            )
+            imgui.pop_item_width()
+
+        imgui.text("Detection Statistics")
+        filtered_obbs, _ = self._get_filtered_obbs()
+        current_detections = len(filtered_obbs)
+        imgui.text(f"Shown: {current_detections} / {self.total_detections}")
+        if self.total_detections > 0:
+            percentage = (current_detections / self.total_detections) * 100
+            imgui.text(f"  ({percentage:.1f}%)")
+
+        imgui.push_item_width(200)
+        color_mode_names = ["Semantic", "PCA", "Prob", "Semantic Alt", "Random"]
+        changed, self.color_mode = imgui.combo(
+            "Color Mode", self.color_mode, color_mode_names
+        )
+        if changed:
+            self._build_geometry_cache()
+            if self.tracked_all_instances:
+                self._build_tracked_all_geometry()
+            self._rgb_tracked_all_color_cache = None
+            self._rgb_tracked_all_color_mode_cache = None
+            self._rebuild_rgb_projections()
+
+        if self.color_mode == COLOR_MODE_SEMANTIC:
+            imgui.text_colored("  Text-based semantic matching", 0.3, 0.6, 1.0)
+        elif self.color_mode == COLOR_MODE_PCA:
+            imgui.text_colored("  PCA of text embeddings", 0.3, 1.0, 0.3)
+        elif self.color_mode == COLOR_MODE_PROBABILITY:
+            imgui.text_colored("  Jet colormap by probability", 1.0, 0.5, 0.0)
+        elif self.color_mode == COLOR_MODE_SEMANTIC_ALT:
+            imgui.text_colored("  Semantic (white bg friendly)", 0.4, 0.4, 0.65)
+
+        imgui.separator()
+
+        imgui.text("Fusion Parameters")
+        imgui.push_item_width(200)
+        _changed, self.fusion_iou_threshold = imgui.slider_float(
+            "IOU Threshold", self.fusion_iou_threshold, 0.0, 1.0
+        )
+        _changed, self.fusion_min_detections = imgui.slider_int(
+            "Min Detections", self.fusion_min_detections, 1, 10
+        )
+        _changed, self.fusion_samp_per_dim = imgui.slider_int(
+            "IoU Samples", self.fusion_samp_per_dim, 1, 32
+        )
+        imgui.pop_item_width()
+
+        imgui.push_item_width(200)
+        weighting_modes = ["uniform", "linear", "quadratic", "robust"]
+        current_idx = weighting_modes.index(self.fusion_confidence_weighting)
+        weighting_changed, new_idx = imgui.combo(
+            "Confidence Weighting", current_idx, weighting_modes
+        )
+        if weighting_changed:
+            self.fusion_confidence_weighting = weighting_modes[new_idx]
+        imgui.pop_item_width()
+
+        imgui.separator()
+
+        _changed, self.fusion_enable_nms = imgui.checkbox(
+            "Enable Fused NMS", self.fusion_enable_nms
+        )
+        if imgui.is_item_hovered():
+            imgui.begin_tooltip()
+            imgui.text("Remove redundant fused boxes with:")
+            imgui.text("  • IoU > threshold")
+            imgui.text("  • Semantic similarity > threshold")
+            imgui.end_tooltip()
+
+        if self.tracked_all_instances:
+            imgui.text(f"Fused: {len(self.tracked_all_instances)} instances")
+            total_detections = sum(
+                inst.support_count for inst in self.tracked_all_instances
+            )
+            imgui.text(f"  From: {total_detections} detections")
+
     def _render_main_controls(self) -> None:
         """Render the main control panel UI."""
         self._section_header("Playback")
@@ -2829,162 +2951,10 @@ class OBBViewer(OrbitViewer):
             )
             imgui.pop_item_width()
             imgui.text("Space: play/pause, Left/Right: step")
+        self._render_fusion_controls()
+
         self._section_header("Visualization")
         self._render_common_visual_controls()
-
-        self._section_header("Fusion")
-
-        # Check if fusion parameters are out of date
-        fusion_out_of_date = (
-            self._last_fusion_iou_threshold != self.fusion_iou_threshold
-            or self._last_fusion_min_detections != self.fusion_min_detections
-            or self._last_fusion_confidence_weighting
-            != self.fusion_confidence_weighting
-            or self._last_fusion_samp_per_dim != self.fusion_samp_per_dim
-            or self._last_fusion_semantic_threshold != self.fusion_semantic_threshold
-            or self._last_fusion_enable_nms != self.fusion_enable_nms
-            or self._last_fusion_nms_iou_threshold != self.fusion_nms_iou_threshold
-            or self._last_fusion_prob_threshold
-            != self.prob_threshold  # Include prob threshold
-        )
-
-        # Button to run fusion (with "out of date" indicator) - AT THE TOP
-        # Make button bigger by setting a custom size
-        button_label = (
-            "RUN FUSION (out of date)" if fusion_out_of_date else "RUN FUSION"
-        )
-        button_width = 400  # Wider button
-        button_height = 40  # Taller button
-        if imgui.button(button_label, width=button_width, height=button_height):
-            self._run_fusion()
-            self._rgb_tracked_all_cache_epoch += 1
-            self._rgb_tracked_all_color_cache = None
-            self._rgb_tracked_all_color_mode_cache = None
-            self._rebuild_rgb_projections()
-
-        imgui.separator()
-
-        # Set narrower width for sliders to give more space to labels
-        imgui.push_item_width(200)
-
-        # Probability threshold slider (invalidates cache when changed)
-        prob_changed, new_prob = imgui.slider_float(
-            "3DBB Conf Thresh", self.prob_threshold, 0.0, 1.0
-        )
-        if prob_changed:
-            self.prob_threshold = new_prob
-            # Invalidate cache when threshold changes
-            self._cached_filtered_obbs = None
-
-        imgui.pop_item_width()
-
-        # Semantic similarity threshold slider
-        imgui.push_item_width(200)
-        _changed, self.fusion_semantic_threshold = imgui.slider_float(
-            "Semantic Merge Thresh", self.fusion_semantic_threshold, 0.0, 1.0
-        )
-        imgui.pop_item_width()
-
-        imgui.separator()
-
-        # NMS IoU threshold slider (only shown when NMS is enabled)
-        if self.fusion_enable_nms:
-            imgui.push_item_width(200)
-            _changed, self.fusion_nms_iou_threshold = imgui.slider_float(
-                "NMS IoU Thresh", self.fusion_nms_iou_threshold, 0.5, 1.0
-            )
-            imgui.pop_item_width()
-
-        # Detection count display (uses cached filtered OBBs)
-        imgui.text("Detection Statistics")
-        # Use cached filtered OBBs (only recalculates if threshold changed)
-        filtered_obbs, _ = self._get_filtered_obbs()  # Unpack tuple, ignore indices
-        current_detections = len(filtered_obbs)
-        imgui.text(f"Shown: {current_detections} / {self.total_detections}")
-        if self.total_detections > 0:
-            percentage = (current_detections / self.total_detections) * 100
-            imgui.text(f"  ({percentage:.1f}%)")
-
-        # Color mode dropdown
-        imgui.push_item_width(200)
-
-        color_mode_names = ["Semantic", "PCA", "Prob", "Semantic Alt", "Random"]
-        changed, self.color_mode = imgui.combo(
-            "Color Mode", self.color_mode, color_mode_names
-        )
-        if changed:
-            # Rebuild geometry with new color mode
-            self._build_geometry_cache()
-            # ALSO rebuild fused geometry to update colors
-            if self.tracked_all_instances:
-                self._build_tracked_all_geometry()
-            self._rgb_tracked_all_color_cache = None
-            self._rgb_tracked_all_color_mode_cache = None
-            self._rebuild_rgb_projections()
-
-        # Show current mode info
-        if self.color_mode == COLOR_MODE_SEMANTIC:
-            imgui.text_colored("  Text-based semantic matching", 0.3, 0.6, 1.0)
-        elif self.color_mode == COLOR_MODE_PCA:
-            imgui.text_colored("  PCA of text embeddings", 0.3, 1.0, 0.3)
-        elif self.color_mode == COLOR_MODE_PROBABILITY:
-            imgui.text_colored("  Jet colormap by probability", 1.0, 0.5, 0.0)
-        elif self.color_mode == COLOR_MODE_SEMANTIC_ALT:
-            imgui.text_colored("  Semantic (white bg friendly)", 0.4, 0.4, 0.65)
-
-        imgui.separator()
-
-        # Fusion parameters
-        imgui.text("Fusion Parameters")
-
-        # Set narrower width for fusion sliders
-        imgui.push_item_width(200)
-
-        iou_changed, self.fusion_iou_threshold = imgui.slider_float(
-            "IOU Threshold", self.fusion_iou_threshold, 0.0, 1.0
-        )
-        min_det_changed, self.fusion_min_detections = imgui.slider_int(
-            "Min Detections", self.fusion_min_detections, 1, 10
-        )
-        samp_per_dim_changed, self.fusion_samp_per_dim = imgui.slider_int(
-            "IoU Samples", self.fusion_samp_per_dim, 1, 32
-        )
-
-        imgui.pop_item_width()
-
-        # Confidence weighting dropdown
-        imgui.push_item_width(200)
-        weighting_modes = ["uniform", "linear", "quadratic", "robust"]
-        current_idx = weighting_modes.index(self.fusion_confidence_weighting)
-        weighting_changed, new_idx = imgui.combo(
-            "Confidence Weighting", current_idx, weighting_modes
-        )
-        if weighting_changed:
-            self.fusion_confidence_weighting = weighting_modes[new_idx]
-
-        imgui.pop_item_width()
-
-        imgui.separator()
-
-        # Checkbox to enable NMS on fused boxes
-        _changed, self.fusion_enable_nms = imgui.checkbox(
-            "Enable Fused NMS", self.fusion_enable_nms
-        )
-        if imgui.is_item_hovered():
-            imgui.begin_tooltip()
-            imgui.text("Remove redundant fused boxes with:")
-            imgui.text("  • IoU > threshold")
-            imgui.text("  • Semantic similarity > threshold")
-            imgui.end_tooltip()
-
-        # Show fusion stats if available
-        if self.tracked_all_instances:
-            imgui.text(f"Fused: {len(self.tracked_all_instances)} instances")
-            # Count total detections
-            total_detections = sum(
-                inst.support_count for inst in self.tracked_all_instances
-            )
-            imgui.text(f"  From: {total_detections} detections")
 
         self._section_header("Camera")
         if imgui.button("Focus on Scene"):
@@ -3087,6 +3057,7 @@ class TrackerViewer(OBBViewer):
         verbose: bool = False,
         scannet_scene: str | None = None,
         scannet_annotation_path: str = "~/data/scannet/full_annotations.json",
+        seq_ctx: dict | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize tracker viewer.
@@ -3095,7 +3066,10 @@ class TrackerViewer(OBBViewer):
             timed_obbs: Dict mapping timestamp -> ObbTW tensor of detections per frame
             root_path: Root path for the sequence
             force_cpu: Force IoU computation on CPU
+            seq_ctx: Pre-built sequence context dict. When provided, skips
+                _load_sequence_context_auto() and uses this context directly.
         """
+        self._prebuilt_seq_ctx = seq_ctx
         t_init0 = time_module.perf_counter()
         _startup_log("TrackerViewer init start")
         self.timed_obbs = timed_obbs
@@ -3209,27 +3183,28 @@ class TrackerViewer(OBBViewer):
         self._rgb_vrs_w: int = 0  # Original VRS image width (before rotation)
         try:
             t_ctx0 = time_module.perf_counter()
-            seq_ctx = _load_sequence_context_auto(
-                seq_name=seq_name,
-                scannet_scene=self.scannet_scene,
-                scannet_annotation_path=self.scannet_annotation_path,
-                with_sdp=True,
-                start_frame=max(0, self._loader_start_frame),
-                max_frames=(
-                    self._loader_max_frames
-                    if self._loader_max_frames > 0
-                    else self.total_frames
-                ),
-            )
+            if self._prebuilt_seq_ctx is not None:
+                seq_ctx = self._prebuilt_seq_ctx
+            else:
+                seq_ctx = _load_sequence_context_auto(
+                    seq_name=seq_name,
+                    scannet_scene=self.scannet_scene,
+                    scannet_annotation_path=self.scannet_annotation_path,
+                    with_sdp=True,
+                    start_frame=max(0, self._loader_start_frame),
+                    max_frames=(
+                        self._loader_max_frames
+                        if self._loader_max_frames > 0
+                        else self.total_frames
+                    ),
+                )
             self._data_source = seq_ctx.get("source", "aria")
             source_name = {
                 "ca1m": "CALoader",
                 "scannet": "ScanNetLoader",
             }.get(self._data_source, "AriaLoader")
             print("Data source: " + source_name)
-            self._aria_loader = seq_ctx.get("aria", None)
-            self._ca_loader = seq_ctx.get("ca_loader", None)
-            self._scannet_loader = seq_ctx.get("scannet_loader", None)
+            self._loader = seq_ctx.get("loader", None)
             self._scannet_scene_dir = seq_ctx.get("scannet_scene_dir", None)
             self._scannet_frame_ids = seq_ctx.get("scannet_frame_ids", None)
             self._rgb_num_frames = seq_ctx["rgb_num_frames"]
@@ -3240,9 +3215,9 @@ class TrackerViewer(OBBViewer):
             self.pose_ts = seq_ctx["pose_ts"]
             self.calibs = seq_ctx["calibs"]
             self.calib_ts = seq_ctx["calib_ts"]
-            if self._aria_loader is not None:
+            if self._data_source == "aria" and self._loader is not None:
                 print(
-                    f"Loaded VRS with {self._rgb_num_frames} RGB frames from {self._aria_loader.vrs_path}"
+                    f"Loaded VRS with {self._rgb_num_frames} RGB frames from {self._loader.vrs_path}"
                 )
             elif self._data_source == "scannet":
                 print(
@@ -3277,7 +3252,7 @@ class TrackerViewer(OBBViewer):
         except Exception as e:
             self._vrs_is_nebula = False
             self._rgb_images = None
-            self._scannet_loader = None
+            self._loader = None
             self._scannet_frame_ids = None
             self.traj = None
             self.pose_ts = np.array([])
@@ -3426,6 +3401,7 @@ class TrackerViewer(OBBViewer):
             skip_precompute=True,
             seq_name=self._seq_name,
             init_image_panel_width=self._init_image_panel_width,
+            seq_ctx=self._prebuilt_seq_ctx,
             **kwargs,
         )
         _startup_log(
@@ -5122,6 +5098,9 @@ class TrackerViewer(OBBViewer):
             "Freeze Tracker", self.freeze_tracker
         )
 
+        if self.freeze_tracker:
+            self._render_fusion_controls()
+
         # === Tracker Parameters ===
         self._section_header("Tracker")
 
@@ -5748,7 +5727,12 @@ def _stack_all_obbs(timed_obbs):
     return torch.stack(all_obbs_list)
 
 
-def main() -> None:
+def _main() -> None:
+    """Standalone entry point for viz_boxer.py (preserved for backward compat)."""
+    import sys as _sys
+    original_argv = _sys.argv.copy()
+    _sys.argv = [_sys.argv[0]]
+
     parser = argparse.ArgumentParser(description="Unified Boxer visualization")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--fuse", action="store_true", help="offline fusion mode")
@@ -5860,12 +5844,31 @@ def main() -> None:
     )
     args = parser.parse_args(original_argv[1:])
 
+    def _resolve_root_and_csv(seq_name, csv_name, root_dir=""):
+        if not root_dir:
+            root_dir = os.path.join(os.path.expanduser("~"), "viz_boxer")
+        root_path = os.path.join(root_dir, seq_name)
+        csv_path = os.path.join(root_path, csv_name)
+        return root_path, csv_path
+
+    def _resolve_and_load_view(root_path, load_view):
+        view_path = os.path.join(root_path, "camera_view.pt")
+        if load_view is None:
+            return view_path, None
+        target = view_path if load_view == "DEFAULT" else load_view
+        if os.path.exists(target):
+            data = torch.load(target, weights_only=False)
+            print(f"Loaded camera view from {target}")
+            return view_path, data
+        print(f"No saved view at {target}")
+        return view_path, None
+
     effective_seq = (
         os.path.basename(args.scannet_scene.rstrip("/"))
         if args.scannet_scene is not None
         else args.seq
     )
-    root_path, csv_path = resolve_root_and_csv(effective_seq, args.csv, args.root_dir)
+    root_path, csv_path = _resolve_root_and_csv(effective_seq, args.csv, args.root_dir)
     timed_obbs = _load_timed_obbs(args, root_path, csv_path)
     print(
         f"Effective OBB range: start_n={args.start_n}, "
@@ -5882,7 +5885,7 @@ def main() -> None:
     total_dets = sum(len(obbs) for obbs in timed_obbs.values())
     print(f"Loaded {len(timed_obbs)} frames, {total_dets} detections total")
 
-    view_path, load_view_data = resolve_and_load_view(root_path, args.load_view)
+    view_path, load_view_data = _resolve_and_load_view(root_path, args.load_view)
     default_w, default_h = 2250, 1100
     init_w = args.window_w if args.window_w > 0 else default_w
     init_h = args.window_h if args.window_h > 0 else default_h
@@ -5953,4 +5956,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    _main()

@@ -20,7 +20,7 @@ from utils.demo_utils import (
 
 from detectors.detic_wrapper import DeticWrapper
 
-from utils.file_io import ObbCsvWriter2, save_bb2d_csv
+from utils.file_io import ObbCsvWriter2, read_obb_csv, load_bb2d_csv, save_bb2d_csv
 from utils.image import put_text, torch2cv2
 
 from utils.render import (
@@ -86,7 +86,10 @@ def main():
     parser.add_argument("--labels", type=comma_separated_list, nargs="?", const=[], default=["lvisplus"], help="Optional comma-separated list of text prompts (e.g. --labels=small or --labels=chair,table,lamp)")
     parser.add_argument("--detector_hw", type=int, default=800, help="resize images before going into 2D detector")
     parser.add_argument("--write_name", default="boxer", type=str, help="name prefix for outputs")
-    parser.add_argument("--skip_viz", action="store_true", help="skip visualization")
+    parser.add_argument("--viz_headless", action="store_true", help="run OpenCV 2D panel visualization")
+    parser.add_argument("--viz_3d", action="store_true", help="launch interactive 3D viewer after pipeline")
+    parser.add_argument("--cache2d", action="store_true", help="load 2D BBs from CSV instead of running detector")
+    parser.add_argument("--cache3d", action="store_true", help="load 3D BBs from CSV instead of running BoxerNet")
     parser.add_argument("--no_sdp", action="store_true", help="turn off SDP input")
     parser.add_argument("--force_cpu", action="store_true", help="force CPU")
     parser.add_argument("--gt2d", action="store_true", help="use GT pseudo 2DBB as input")
@@ -99,20 +102,54 @@ def main():
 
     if args.fuse and args.track:
         parser.error("--fuse and --track are mutually exclusive")
+    if args.cache3d:
+        args.cache2d = True
+    if args.viz_3d and not args.track and not args.fuse:
+        args.fuse = True
     print(args)
     # fmt: on
 
 
-    # Determine dataset type from input string
+    # Determine dataset type and seq_name from input string
     if bool(re.search(r"scene\d{4}_\d{2}", args.input)) or "/scannet/" in args.input:
         dataset_type = "scannet"
+        seq_name = os.path.basename(args.input.rstrip("/"))
     elif args.input in OMNI3D_DATASETS:
         dataset_type = "omni3d"
+        seq_name = args.input
     elif args.input.startswith("ca1m"):
         dataset_type = "ca1m"
+        seq_name = args.input
     else:
         dataset_type = "aria"
+        remote_root = handle_input(expand_seq_shorthand(args.input))
+        seq_name = remote_root.rstrip("/").split("/")[-1]
 
+    # get name of containing directory
+    output_dir = os.path.expanduser(args.output_dir)
+    log_dir = os.path.join(output_dir, seq_name)
+    os.makedirs(log_dir, exist_ok=True)
+    csv_path = os.path.join(log_dir, f"{args.write_name}_3dbbs.csv")
+    csv2d_out_path = os.path.join(log_dir, f"{args.write_name}_2dbbs.csv")
+    print(f"==> Created output folder {log_dir}")
+
+    # --cache3d: skip detection + BoxerNet + loader, go straight to post-processing
+    if args.cache3d:
+        print(f"==> Loading cached 3D BBs from {csv_path}")
+        cached_timed_obbs = read_obb_csv(csv_path)
+        total_dets = sum(len(obbs) for obbs in cached_timed_obbs.values())
+        print(f"==> Loaded {len(cached_timed_obbs)} frames, {total_dets} detections from cache")
+
+        if args.fuse:
+            from utils.fuse_3d_boxes import fuse_obbs_from_csv
+            print(f"\n==> Running fusion on {csv_path}")
+            fuse_obbs_from_csv(csv_path)
+
+        if args.viz_3d:
+            _launch_3d_viewer(args, None, dataset_type, seq_name, log_dir, csv_path, csv2d_out_path)
+        return
+
+    # Create data loader
     if dataset_type == "scannet":
         loader = ScanNetLoader(
             scene_dir=args.input,
@@ -123,7 +160,6 @@ def main():
         )
         seq_name = loader.scene_id
     elif dataset_type == "omni3d":
-        seq_name = args.input
         print(f"==> Loading Omni3D dataset: {args.input} (val)")
         loader = OmniLoader(
             dataset_name=args.input,
@@ -143,7 +179,6 @@ def main():
             )
             args.track = False
     elif dataset_type == "ca1m":
-        seq_name = args.input
         loader = CALoader(
             seq_name,
             start_frame=args.start_n,
@@ -154,10 +189,7 @@ def main():
             use_canny=False,
         )
     else:
-        remote_root = handle_input(expand_seq_shorthand(args.input))
-        seq_name = remote_root.rstrip("/").split("/")[-1]
         print(f"==> Sequence name: '{seq_name}'")
-
         loader = AriaLoader(
             remote_root,
             camera=args.camera,
@@ -220,7 +252,14 @@ def main():
         else:
             print(text_labels)
 
-    if args.gt2d:
+    # Load 2D detector (skip if --cache2d)
+    if args.cache2d:
+        print(f"==> Loading cached 2D BBs from {csv2d_out_path}")
+        bb2d_cache = load_bb2d_csv(csv2d_out_path)
+        bb2d_cache_timestamps = np.array(sorted(bb2d_cache.keys()), dtype=np.int64)
+        print(f"==> Loaded {len(bb2d_cache)} frames of 2D BBs from cache")
+        method = "CACHED"
+    elif args.gt2d:
         method = "GT2D"
     elif args.detector == "detic":
         det2d = DeticWrapper(
@@ -252,12 +291,8 @@ def main():
         print(f"  {name}: {module.__class__.__name__} ({n_params / 1e6:.2f}M)")
     print("=" * 50)
 
-    # get name of containing directory
-    output_dir = os.path.expanduser(args.output_dir)
-    log_dir = os.path.join(output_dir, seq_name)
-    os.makedirs(log_dir, exist_ok=True)
     video_dir = os.path.join(log_dir, f"{args.write_name}_viz")
-    if not args.skip_viz:
+    if args.viz_headless:
         safe_delete_folder(
             video_dir, extensions=[".png"], keep_folder=True, recursive=True
         )
@@ -265,7 +300,6 @@ def main():
         print(
             f"==> Current frame: {os.path.join(log_dir, f'{args.write_name}_viz_current.png')}"
         )
-    print(f"==> Created output folder {log_dir}")
 
     colors = {
         label: (np.random.randint(100, 255), np.random.randint(100, 255), np.random.randint(100, 255))
@@ -279,9 +313,7 @@ def main():
         sem_name_to_id = {label: i for i, label in enumerate(text_labels)}
         sem_id_to_name = {v: k for k, v in sem_name_to_id.items()}
 
-    csv_path = os.path.join(log_dir, f"{args.write_name}_3dbbs.csv")
     writer = ObbCsvWriter2(csv_path)
-    csv2d_out_path = os.path.join(log_dir, f"{args.write_name}_2dbbs.csv")
 
     tracker = None
     if args.track:
@@ -322,7 +354,7 @@ def main():
             continue
 
         # Collect timestamp for FPS calculation
-        if not args.skip_viz and "time_ns0" in datum:
+        if args.viz_headless and "time_ns0" in datum:
             timestamps_ns.append(int(datum["time_ns0"]))
 
         img_torch = datum["img0"]
@@ -339,7 +371,30 @@ def main():
 
         # 2D Detection
         timer.start("det2d")
-        if args.gt2d:
+        if args.cache2d:
+            # Look up cached 2D BBs by timestamp
+            time_ns = int(datum["time_ns0"])
+            cache_entry = None
+            if time_ns in bb2d_cache:
+                cache_entry = bb2d_cache[time_ns]
+            else:
+                # Find nearest timestamp
+                idx = np.searchsorted(bb2d_cache_timestamps, time_ns)
+                idx = min(idx, len(bb2d_cache_timestamps) - 1)
+                nearest_ts = int(bb2d_cache_timestamps[idx])
+                if abs(nearest_ts - time_ns) < 50_000_000:  # within 50ms
+                    cache_entry = bb2d_cache[nearest_ts]
+            if cache_entry is not None and len(cache_entry["bb2d"]) > 0:
+                # Convert from numpy (x1,y1,x2,y2) to torch boxer format (x1,x2,y1,y2)
+                bb2d_np = cache_entry["bb2d"]
+                bb2d = torch.from_numpy(bb2d_np[:, [0, 2, 1, 3]]).float()
+                scores2d = torch.from_numpy(cache_entry["scores"]).float()
+                labels2d = list(cache_entry["labels"])
+            else:
+                bb2d = torch.zeros(0, 4)
+                scores2d = torch.zeros(0)
+                labels2d = []
+        elif args.gt2d:
             # Check if there are any valid GT objects for this frame
             obbs_valid = datum["obbs"].remove_padding()
             if len(obbs_valid) == 0:
@@ -347,7 +402,7 @@ def main():
                 pbar.set_postfix_str(
                     f"0 GT obbs | load:{t_load:.0f}ms det2d:{t_det2d:.0f}ms"
                 )
-                if not args.skip_viz:
+                if args.viz_headless:
                     write_empty_frame(img_np, HH, WW, ii)
 
                 continue
@@ -369,7 +424,7 @@ def main():
                 pbar.set_postfix_str(
                     f"0 valid bb2d | load:{t_load:.0f}ms det2d:{t_det2d:.0f}ms"
                 )
-                if not args.skip_viz:
+                if args.viz_headless:
                     write_empty_frame(img_np, HH, WW, ii)
                 continue
 
@@ -391,7 +446,7 @@ def main():
 
         if bb2d.shape[0] == 0:
             pbar.set_postfix_str(f"0 dets | load:{t_load:.0f}ms det2d:{t_det2d:.0f}ms")
-            if not args.skip_viz:
+            if args.viz_headless:
                 write_empty_frame(img_np, HH, WW, ii)
             continue
 
@@ -476,7 +531,7 @@ def main():
             )
             t_track = timer.stop("track")
 
-        if not args.skip_viz:
+        if args.viz_headless:
             bb2_texts = [f"{l} {s:.2f}" for s, l in zip(scores2d, labels2d)]
             bb2_colors = [(np.array(jet_color(1.0 - s)) * 255).tolist() for s in scores2d]
             bb3_texts = [f"{l} {s:.2f}" for s, l in zip(scores3d, labels3d)]
@@ -581,7 +636,7 @@ def main():
         timing_str += f" viz:{t_viz:.0f}ms"
         pbar.set_postfix_str(f"{len(bb2d)} 2D, {obb_pr_w.shape[0]} 3D | " + timing_str)
 
-    if not args.skip_viz:
+    if args.viz_headless:
         # Calculate FPS from RGB timestamps
         if dataset_type in ("omni3d", "scannet"):
             # Omni3D/ScanNet: no real nanosecond timestamps, use fixed framerate
@@ -632,6 +687,141 @@ def main():
             track_writer.write(tracked_obbs, timestamps_ns=0, sem_id_to_name=track_sem)
             track_writer.close()
             print(f"==> Saved {len(active_tracks)} tracked OBBs to {track_output_path}")
+
+    if args.viz_3d:
+        _launch_3d_viewer(args, loader, dataset_type, seq_name, log_dir, csv_path, csv2d_out_path)
+
+
+def _build_seq_ctx(loader, dataset_type):
+    """Build viewer-compatible sequence context from existing loader."""
+    if dataset_type == "aria":
+        rgb_stream_id = loader.stream_id[0]
+        rgb_num_frames = loader.provider.get_num_data(rgb_stream_id)
+        rgb_timestamps = (
+            np.array(loader.pose_ts, dtype=np.int64)
+            if getattr(loader, "pose_ts", None) is not None and len(loader.pose_ts) > 0
+            else np.array([0], dtype=np.int64)
+        )
+        data = {
+            "source": "aria",
+            "loader": loader,
+            "rgb_num_frames": rgb_num_frames,
+            "rgb_timestamps": rgb_timestamps,
+            "rgb_images": None,
+            "is_nebula": bool(loader.is_nebula),
+            "traj": loader.traj,
+            "pose_ts": loader.pose_ts,
+            "calibs": loader.calibs[0],
+            "calib_ts": loader.calib_ts,
+            "time_to_uids_slaml": getattr(loader, "time_to_uids_slaml", None),
+            "time_to_uids_slamr": getattr(loader, "time_to_uids_slamr", None),
+            "uid_to_p3": getattr(loader, "uid_to_p3", None),
+        }
+        return data
+    elif dataset_type == "ca1m":
+        rgb_timestamps = np.array(loader.timestamp_ns)
+        n = len(rgb_timestamps)
+        traj = [(loader.Ts_wc[i] @ loader.cams[i].T_camera_rig).float() for i in range(n)]
+        return {
+            "source": "ca1m",
+            "rgb_num_frames": n,
+            "rgb_timestamps": rgb_timestamps,
+            "rgb_images": loader.rgb_images,
+            "is_nebula": True,
+            "traj": traj,
+            "pose_ts": rgb_timestamps,
+            "calibs": loader.cams,
+            "calib_ts": rgb_timestamps,
+            "loader": loader,
+            "time_to_uids_slaml": None,
+            "time_to_uids_slamr": None,
+            "uid_to_p3": None,
+        }
+    elif dataset_type == "scannet":
+        from utils.camera import CameraTW
+        from utils.pose import PoseTW
+        frame_ids = list(loader.frame_ids)
+        # Read first image to get dimensions
+        first_fid = frame_ids[0]
+        color_path = os.path.join(loader.scene_dir, "frames", "color", f"{first_fid}.png")
+        if not os.path.exists(color_path):
+            color_path = os.path.join(loader.scene_dir, "frames", "color", f"{first_fid}.jpg")
+        first_bgr = cv2.imread(color_path)
+        H, W = first_bgr.shape[:2]
+        T_cam_rig = torch.tensor(
+            [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], dtype=torch.float32
+        )
+        cam_data = torch.tensor(
+            [W, H, loader.fx, loader.fy, loader.cx, loader.cy, -1, 1e-3, W, H],
+            dtype=torch.float32,
+        )
+        cam_template = CameraTW(torch.cat([cam_data, T_cam_rig])).float()
+
+        rgb_timestamps = np.array([int(fid) for fid in frame_ids], dtype=np.int64)
+        traj = []
+        calibs = []
+        for fid in frame_ids:
+            pose_path = os.path.join(loader.scene_dir, "frames", "pose", f"{fid}.txt")
+            T_world_cam = np.loadtxt(pose_path).astype(np.float32)
+            T_world_cam[:3, 3] -= loader.world_offset.astype(np.float32)
+            R_flat = T_world_cam[:3, :3].reshape(-1)
+            t_vec = T_world_cam[:3, 3]
+            T_wr_data = torch.tensor([*R_flat, *t_vec], dtype=torch.float32)
+            traj.append(PoseTW(T_wr_data).float())
+            calibs.append(cam_template.clone())
+        return {
+            "source": "scannet",
+            "loader": loader,
+            "scannet_scene_dir": loader.scene_dir,
+            "scannet_frame_ids": list(frame_ids),
+            "rgb_num_frames": len(frame_ids),
+            "rgb_timestamps": rgb_timestamps,
+            "rgb_images": None,
+            "is_nebula": True,
+            "traj": traj,
+            "pose_ts": rgb_timestamps,
+            "calibs": calibs,
+            "calib_ts": rgb_timestamps,
+            "time_to_uids_slaml": None,
+            "time_to_uids_slamr": None,
+            "uid_to_p3": None,
+        }
+    else:
+        return None
+
+
+def _launch_3d_viewer(args, loader, dataset_type, seq_name, log_dir, csv_path, csv2d_out_path):
+    """Launch interactive 3D viewer after pipeline completes."""
+    import sys
+    saved_argv = sys.argv.copy()
+    sys.argv = [sys.argv[0]]  # prevent moderngl-window from consuming args
+
+    from utils.viz_boxer import TrackerViewer
+    import moderngl_window as mglw
+
+    timed_obbs = read_obb_csv(csv_path)
+    seq_ctx = _build_seq_ctx(loader, dataset_type) if loader is not None else None
+
+    bb2d_csv_path = csv2d_out_path if os.path.exists(csv2d_out_path) else ""
+
+    class Viewer(TrackerViewer):
+        window_size = (2250, 1100)
+        def __init__(self, **kw):
+            super().__init__(
+                timed_obbs=timed_obbs,
+                root_path=log_dir,
+                seq_ctx=seq_ctx,
+                bb2d_csv_path=bb2d_csv_path,
+                **kw,
+            )
+            if not args.track:
+                self.freeze_tracker = True
+                self.show_raw_set = True
+
+    try:
+        mglw.run_window_config(Viewer)
+    finally:
+        sys.argv = saved_argv
 
 
 if __name__ == "__main__":
