@@ -18,7 +18,6 @@ from utils.demo_utils import (
     handle_input,
 )
 
-from detectors.detic_wrapper import DeticWrapper
 
 from utils.file_io import ObbCsvWriter2, read_obb_csv, load_bb2d_csv, save_bb2d_csv
 from utils.image import put_text, torch2cv2
@@ -65,7 +64,7 @@ TAB20 = [
 ]
 
 def detect_frame(datum, det2d, boxernet, text_labels, sem_name_to_id, sem_id_to_name,
-                  thresh2d, thresh3d, detector_type, device, no_sdp=False):
+                  thresh2d, thresh3d, device, no_sdp=False):
     """Run 2D detection + 3D BoxerNet on a single frame datum.
 
     Returns: (obb_pr_w: ObbTW, time_ns: int) or (None, time_ns) if no detections.
@@ -84,10 +83,7 @@ def detect_frame(datum, det2d, boxernet, text_labels, sem_name_to_id, sem_id_to_
         rotated.item(),
         resize_to_HW=(800, 800),
     )
-    if detector_type == "detic":
-        labels2d = list(label_ints)
-    else:
-        labels2d = [text_labels[label_int] for label_int in label_ints]
+    labels2d = [text_labels[label_int] for label_int in label_ints]
 
     if bb2d.shape[0] == 0:
         return (None, time_ns)
@@ -150,7 +146,7 @@ def main():
     parser.add_argument("--max_n", type=int, default=99999, help="run for max n frames")
     parser.add_argument("--pinhole", action="store_true", help="rectify to pinhole")
     parser.add_argument("--camera", type=str, default="rgb", choices=["rgb", "slaml", "slamr"], help="camera to use (default: rgb)")
-    parser.add_argument("--detector", type=str, default="owl", choices=["owl", "detic"], help="2D detector to use (default: owl)")
+    parser.add_argument("--detector", type=str, default="owl", choices=["owl"], help="2D detector to use (default: owl)")
     parser.add_argument("--thresh2d", type=float, default=0.2, help="detection confidence for 2d detector")
     parser.add_argument("--thresh3d", type=float, default=0.5, help="detection confidence for boxer")
     parser.add_argument("--labels", type=comma_separated_list, nargs="?", const=[], default=["lvisplus"], help="Optional comma-separated list of text prompts (e.g. --labels=small or --labels=chair,table,lamp)")
@@ -336,15 +332,6 @@ def main():
         method = "CACHED"
     elif args.gt2d:
         method = "GT2D"
-    elif args.detector == "detic":
-        det2d = DeticWrapper(
-            device=device,
-            model_width=args.detector_hw,
-            model_height=args.detector_hw,
-            selected_classes=text_labels,
-            min_confidence=args.thresh2d,
-        )
-        method = "DETIC"
     else:
         from detectors.owl_wrapper import OwlWrapper
         det2d = OwlWrapper(
@@ -395,7 +382,7 @@ def main():
             def detect_fn(datum):
                 return detect_frame(datum, det2d_model, boxernet_model, text_labels,
                                     sem_name_to_id, sem_id_to_name,
-                                    args.thresh2d, args.thresh3d, args.detector, device, args.no_sdp)
+                                    args.thresh2d, args.thresh3d, device, args.no_sdp)
             return detect_fn
         detect_fn = _make_detect_fn(det2d, boxernet, text_labels, sem_name_to_id, sem_id_to_name, args, device)
         online_writer = ObbCsvWriter2(csv_path)
@@ -526,11 +513,7 @@ def main():
                 rotated.item(),
                 resize_to_HW=(args.detector_hw, args.detector_hw),
             )
-            # DETIC returns class names directly, OWL returns indices into text_labels
-            if args.detector == "detic":
-                labels2d = list(label_ints)
-            else:
-                labels2d = [text_labels[label_int] for label_int in label_ints]
+            labels2d = [text_labels[label_int] for label_int in label_ints]
 
         t_det2d = timer.stop("det2d")
 
@@ -565,7 +548,7 @@ def main():
             if label in sem_name_to_id:
                 sem_ids[i] = sem_name_to_id[label]
             else:
-                # For DETIC, dynamically add new labels to the mapping
+                # Dynamically add new labels to the mapping
                 new_id = len(sem_name_to_id)
                 sem_name_to_id[label] = new_id
                 sem_id_to_name[new_id] = label

@@ -64,9 +64,10 @@ pip install sentence-transformers   # for semantic track merging
 # 3D interactive viewer (optional, for --viz_3d)
 pip install moderngl moderngl-window imgui[glfw] pyrr
 
-# 2D detectors (install at least one)
-pip install transformers            # for OWLv2 (default)
-pip install detic                   # for DETIC (alternative)
+# 2D detector: export OWLv2 checkpoint (one-time, requires transformers)
+pip install transformers
+python detectors/export_owl.py      # saves to ~/data/boxer/owlv2-base-patch16-ensemble.pt
+pip uninstall transformers           # optional: no longer needed at runtime
 
 ```
 
@@ -85,9 +86,6 @@ mkdir -p ~/data/boxer
 ```bash
 # Basic: run on an Aria sequence with OWLv2 detector
 python run_boxer.py --input /path/to/aria/sequence
-
-# Use DETIC detector instead of OWL
-python run_boxer.py --input /path/to/sequence --detector detic
 
 # Custom text prompts
 python run_boxer.py --input /path/to/sequence --labels=chair,table,lamp
@@ -127,7 +125,7 @@ Results are written to `~/viz_boxer/<sequence_name>/`:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--input` | | Path to input sequence |
-| `--detector` | `owl` | 2D detector: `owl` or `detic` |
+| `--detector` | `owl` | 2D detector (`owl`) |
 | `--labels` | `lvisplus` | Comma-separated text prompts, or a taxonomy name |
 | `--thresh2d` | `0.2` | 2D detection confidence threshold |
 | `--thresh3d` | `0.5` | 3D box confidence threshold |
@@ -155,8 +153,9 @@ boxer/
 │   ├── attention_utils.py    # Transformer blocks (self/cross-attention)
 │   └── dinov3_wrapper.py     # DINOv3 backbone wrapper
 ├── detectors/
-│   ├── owl_wrapper.py        # OWLv2 open-vocabulary detector
-│   └── detic_wrapper.py      # DETIC detector
+│   ├── owl_wrapper.py        # OWLv2 open-vocabulary detector (JIT-traced, no transformers needed)
+│   ├── clip_tokenizer.py     # Minimal CLIP BPE tokenizer
+│   └── export_owl.py         # One-time export script (requires transformers)
 ├── loaders/
 │   ├── base_loader.py        # Base loader interface
 │   ├── aria_loader.py        # Aria glasses data loader
