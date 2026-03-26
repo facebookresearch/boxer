@@ -18,7 +18,7 @@ For lifting a video sequence we need the same as above, but needs the full 6 DoF
 
 # BoxerNet
 
-See [boxernet/BOXERNET.md](boxernet/BOXERNET.md) for architecture details.
+See [boxernet/README.md](boxernet/README.md) for architecture details.
 
 
 ## Installation
@@ -28,6 +28,10 @@ conda create -n boxer python=3.12
 conda activate boxer
 
 pip install 'torch>=2.0' opencv-python tqdm
+
+# ffmpeg (required for video output)
+# macOS: brew install ffmpeg
+# Ubuntu: sudo apt install ffmpeg
 
 # Aria data (optional, for Project Aria sequences)
 pip install projectaria-tools
@@ -134,7 +138,7 @@ boxer/
 │   ├── ca_loader.py          # CA-1M dataset loader
 │   ├── omni_loader.py        # Omni3D dataset loader
 │   └── scannet_loader.py     # ScanNet dataset loader
-├── tests/                    # Unit tests (see tests/TESTING.md)
+├── tests/                    # Unit tests (see tests/README.md)
 ├── tw/                       # TensorWrapper types
 │   ├── tensor_wrapper.py     # TensorWrapper base class
 │   ├── camera.py             # CameraTW: camera intrinsics + projection
@@ -160,7 +164,7 @@ boxer/
 
 ## Tests
 
-See [tests/TESTING.md](tests/TESTING.md) for setup, running, and coverage details.
+See [tests/README.md](tests/README.md) for setup, running, and coverage details.
 
 ## FAQ
 

@@ -5376,7 +5376,7 @@ class TrackerViewer(SequenceOBBViewer):
                     imgui.set_next_window_size(panel_w, top_h, imgui.ALWAYS)
                 imgui.set_next_window_collapsed(False, imgui.ONCE)
                 expanded, _ = imgui.begin(
-                    "Per-Frame 2D Detections",
+                    "Per-Frame Detections",
                     flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_MOVE,
                 )
                 if expanded:
@@ -5488,28 +5488,7 @@ class TrackerViewer(SequenceOBBViewer):
             img_min = imgui.get_item_rect_min()
             scale_x = draw_w / tex_w * self._rgb_img_scale
             scale_y = draw_h / tex_h * self._rgb_img_scale
-            # Draw projected OBB wireframes on top of the RGB image
-            if (
-                self.show_rgb_obbs
-                and self.show_rgb_raw
-                and self._rgb_projected_raw_lines
-            ):
-                draw_list = imgui.get_window_draw_list()
-                for edge_pts, edge_valid, color in self._rgb_projected_raw_lines:
-                    # edge_pts: (12, S, 2), edge_valid: (12, S)
-                    col = imgui.get_color_u32_rgba(
-                        float(color[0]), float(color[1]), float(color[2]), 1.0
-                    )
-                    for e in range(edge_pts.shape[0]):
-                        for s in range(edge_pts.shape[1] - 1):
-                            if edge_valid[e, s] and edge_valid[e, s + 1]:
-                                x0 = img_min.x + edge_pts[e, s, 0] * scale_x
-                                y0 = img_min.y + edge_pts[e, s, 1] * scale_y
-                                x1 = img_min.x + edge_pts[e, s + 1, 0] * scale_x
-                                y1 = img_min.y + edge_pts[e, s + 1, 1] * scale_y
-                                draw_list.add_line(
-                                    x0, y0, x1, y1, col, self.rgb_obb_thickness
-                                )
+            # Draw projected tracked OBB wireframes on top of the RGB image
             if (
                 self.show_rgb_obbs
                 and self.show_rgb_tracked_all
