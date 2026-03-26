@@ -26,7 +26,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.nn.init
-from utils.settings import CKPT_PATH
+from utils.demo_utils import CKPT_PATH
 from torch import nn, Tensor
 
 

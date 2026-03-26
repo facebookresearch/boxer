@@ -6,7 +6,7 @@
 import unittest
 
 import torch
-from boxernet.attention_utils import Attention, AttentionBlockV2, FeedForward
+from boxernet.boxernet import Attention, AttentionBlockV2, FeedForward
 
 
 class TestFeedForward(unittest.TestCase):

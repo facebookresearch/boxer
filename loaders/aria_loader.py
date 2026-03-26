@@ -22,7 +22,7 @@ from utils.file_io import (
 )
 from tw.obb import bb2d_from_project_bb3d
 from tw.pose import PoseTW
-from utils.tensor_utils import find_nearest2
+from tw.tensor_utils import find_nearest2
 
 
 def get_T_zup_yup():

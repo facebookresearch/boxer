@@ -236,12 +236,28 @@ class TestTextEmbedder(unittest.TestCase):
         e2 = self.embedder.forward(["chair"])
         self.assertTrue(torch.allclose(e1, e2))
 
-    @unittest.skipUnless(_has_transformers(), "transformers not installed")
-    def test_matches_owl_wrapper_embeddings(self):
-        """Verify TextEmbedder produces same embeddings as OwlWrapper's text encoder."""
+    def test_matches_owl_text_encoder(self):
+        """Verify TextEmbedder produces same embeddings as OWL checkpoint's text encoder."""
+        import io
+        import os
+        ckpt_path = os.path.expanduser("~/data/boxer/owlv2-base-patch16-ensemble.pt")
+        if not os.path.exists(ckpt_path):
+            self.skipTest("OWL checkpoint not found")
+
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        text_encoder = torch.jit.load(io.BytesIO(checkpoint["text_encoder"]), map_location="cpu")
+        text_encoder.eval()
+        tokenizer = CLIPTokenizer(
+            vocab=checkpoint["tokenizer_vocab"],
+            merges=checkpoint["tokenizer_merges"],
+            max_length=checkpoint["config"]["max_seq_length"],
+        )
+
         prompts = ["chair", "table", "lamp", "a photo of a dog"]
-        wrapper = OwlWrapper("cpu", text_prompts=prompts, min_confidence=0.1)
-        owl_embeds = torch.nn.functional.normalize(wrapper.text_embeddings, dim=-1)
+        tokens = tokenizer(prompts)
+        with torch.no_grad():
+            owl_embeds = text_encoder(tokens["input_ids"], tokens["attention_mask"])
+        owl_embeds = torch.nn.functional.normalize(owl_embeds, dim=-1)
         our_embeds = self.embedder.forward(prompts)
         max_diff = (owl_embeds - our_embeds).abs().max().item()
         self.assertLess(max_diff, 1e-5, f"Embedding max diff {max_diff:.2e}")

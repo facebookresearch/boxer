@@ -16,13 +16,13 @@ from utils.fuse_3d_boxes import (
     angular_distance,
     align_boxes_r90,
 )
-from utils.tensor_utils import pad_string, string2tensor
+from tw.tensor_utils import pad_string, string2tensor
 
 try:
     from scipy.optimize import linear_sum_assignment as scipy_linear_sum_assignment
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import connected_components as scipy_connected_components
-    from utils.hungarian import linear_sum_assignment
+    from utils.fuse_3d_boxes import linear_sum_assignment
     _has_scipy = True
 except ImportError:
     _has_scipy = False

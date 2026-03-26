@@ -35,7 +35,7 @@ from tw.obb import BB3D_LINE_ORDERS, ObbTW
 from utils.orbit_viewer import OrbitViewer
 from tw.pose import PoseTW
 from utils.taxonomy import BOXY_SEM2NAME, SSI_COLORS_ALT, TEXT2COLORS
-from utils.tensor_utils import find_nearest2, tensor2string, unpad_string
+from tw.tensor_utils import find_nearest2, tensor2string, unpad_string
 from utils.track_3d_boxes import BoundingBox3DTracker
 from utils.video import make_mp4
 
@@ -1661,28 +1661,23 @@ class OBBViewer(OrbitViewer):
         _changed, self.show_text_labels = imgui.checkbox(
             "Show Labels", self.show_text_labels
         )
-        if hasattr(self, "show_dimensions"):
-            _changed, self.show_dimensions = imgui.checkbox(
-                "Show Dimensions", self.show_dimensions
-            )
-        _changed, self.show_axis_lines = imgui.checkbox(
-            "Show Axis Lines (RGB=XYZ)", self.show_axis_lines
-        )
 
         imgui.push_item_width(200)
         _changed, self.alpha = imgui.slider_float(
             "Detection Alpha", self.alpha, 0.0, 1.0
         )
-        _changed, self.raw_line_width = imgui.slider_int(
-            "Raw Line Width", self.raw_line_width, 1, 10
-        )
-        _changed, self.tracked_all_line_width = imgui.slider_int(
-            tracked_all_line_label, self.tracked_all_line_width, 1, 10
-        )
-        if show_visible_line_width and hasattr(self, "visible_line_width"):
-            _changed, self.visible_line_width = imgui.slider_int(
-                "Visible Line Width", self.visible_line_width, 1, 10
+        if imgui.tree_node("Line Widths"):
+            _changed, self.raw_line_width = imgui.slider_int(
+                "Raw Line Width", self.raw_line_width, 1, 10
             )
+            _changed, self.tracked_all_line_width = imgui.slider_int(
+                tracked_all_line_label, self.tracked_all_line_width, 1, 10
+            )
+            if show_visible_line_width and hasattr(self, "visible_line_width"):
+                _changed, self.visible_line_width = imgui.slider_int(
+                    "Visible Line Width", self.visible_line_width, 1, 10
+                )
+            imgui.tree_pop()
         imgui.pop_item_width()
         imgui.separator()
 
@@ -2998,7 +2993,6 @@ class TrackerViewer(SequenceOBBViewer):
         init_follow_look_ahead: Optional[float] = None,
         force_cpu: bool = False,
         bb2d_csv_path: str = "",
-        init_overlay2d: bool = False,
         autorecord: bool = False,
         record_fps: float = 10.0,
         teaser: bool = False,
@@ -3063,15 +3057,11 @@ class TrackerViewer(SequenceOBBViewer):
         self.tracker_iou_threshold = 0.25
         self.tracker_min_hits = 8
         self.tracker_conf_threshold = 0.55
-        self.tracker_samp_per_dim = 8
-        self.tracker_max_missed = 90
         self.tracker_force_cpu = force_cpu
         self.tracker_merge_iou = 0.5
         self.tracker_merge_sem = 0.7
         self.tracker_merge_iou_2d = 0.7
-        self.tracker_merge_giou = 0.35
         self.tracker_merge_interval = 5
-        self.tracker_use_giou = False
         self.tracker_min_conf_mass = 4.0
         self.tracker_min_obs_points = 4
         self.tracker_verbose = verbose
@@ -3081,15 +3071,11 @@ class TrackerViewer(SequenceOBBViewer):
             iou_threshold=self.tracker_iou_threshold,
             min_hits=self.tracker_min_hits,
             conf_threshold=self.tracker_conf_threshold,
-            samp_per_dim=self.tracker_samp_per_dim,
-            max_missed=self.tracker_max_missed,
             force_cpu=self.tracker_force_cpu,
             merge_iou_threshold=self.tracker_merge_iou,
             merge_semantic_threshold=self.tracker_merge_sem,
             merge_iou_2d_threshold=self.tracker_merge_iou_2d,
-            merge_giou_threshold=self.tracker_merge_giou,
             merge_interval=self.tracker_merge_interval,
-            use_giou=self.tracker_use_giou,
             min_confidence_mass=self.tracker_min_conf_mass,
             min_obs_points=self.tracker_min_obs_points,
             verbose=self.tracker_verbose,
@@ -3231,7 +3217,6 @@ class TrackerViewer(SequenceOBBViewer):
         self._bb2d_current_boxes: list[tuple[float, float, float, float, str, int]] = []
         self.show_bb2_panel = True  # toggle for the top BB2 panel (per-frame 2D detections)
         self.show_bb2_csv = True  # toggle CSV BB2s in top panel
-        self.overlay_bb2d = init_overlay2d  # overlay 2D BBs on bottom RGB panel
         if bb2d_csv_path and os.path.exists(bb2d_csv_path):
             self._bb2d_data = load_bb2d_csv(bb2d_csv_path)
             self._bb2d_timestamps = np.array(sorted(self._bb2d_data.keys()))
@@ -3562,14 +3547,10 @@ class TrackerViewer(SequenceOBBViewer):
             self.tracker_iou_threshold,
             self.tracker_min_hits,
             self.raw_conf_threshold,
-            self.tracker_samp_per_dim,
-            self.tracker_max_missed,
             self.tracker_merge_iou,
             self.tracker_merge_sem,
             self.tracker_merge_iou_2d,
-            self.tracker_merge_giou,
             self.tracker_merge_interval,
-            self.tracker_use_giou,
             self.tracker_min_conf_mass,
             self.tracker_min_obs_points,
         )
@@ -3926,15 +3907,11 @@ class TrackerViewer(SequenceOBBViewer):
             iou_threshold=self.tracker_iou_threshold,
             min_hits=self.tracker_min_hits,
             conf_threshold=self.tracker_conf_threshold,
-            samp_per_dim=self.tracker_samp_per_dim,
-            max_missed=self.tracker_max_missed,
             force_cpu=self.tracker_force_cpu,
             merge_iou_threshold=self.tracker_merge_iou,
             merge_semantic_threshold=self.tracker_merge_sem,
             merge_iou_2d_threshold=self.tracker_merge_iou_2d,
-            merge_giou_threshold=self.tracker_merge_giou,
             merge_interval=self.tracker_merge_interval,
-            use_giou=self.tracker_use_giou,
             min_confidence_mass=self.tracker_min_conf_mass,
             min_obs_points=self.tracker_min_obs_points,
             verbose=self.tracker_verbose,
@@ -4368,7 +4345,7 @@ class TrackerViewer(SequenceOBBViewer):
                         1.0,
                         0.5
                         + 0.5 * track.support_count / 20.0
-                        - 0.5 * track.missed_count / self.tracker_max_missed,
+                        - 0.5 * track.missed_count / 90.0,
                     ),
                 )
                 health_scores.append(score)
@@ -5041,8 +5018,6 @@ class TrackerViewer(SequenceOBBViewer):
             "Playback FPS", self.playback_fps, 0.5, 60.0
         )
         imgui.pop_item_width()
-        imgui.text("Space: play/pause, Left/Right: step")
-
         if not self._recording:
             if imgui.button("Record", width=90, height=28):
                 self._start_recording()
@@ -5051,20 +5026,16 @@ class TrackerViewer(SequenceOBBViewer):
             if imgui.button("Stop Rec", width=90, height=28):
                 self._stop_recording()
             imgui.pop_style_color()
+        imgui.same_line()
+        if imgui.button("Focus on Scene"):
+            self._focus_on_scene()
 
         _changed, self.freeze_tracker = imgui.checkbox(
             "Freeze Tracker", self.freeze_tracker
         )
 
-        if self.freeze_tracker:
-            self._render_fusion_controls()
-
         # === Tracker Parameters ===
         self._section_header("Tracker")
-
-        _changed, self.tracker_use_giou = imgui.checkbox(
-            "Use GIoU", self.tracker_use_giou
-        )
 
         imgui.push_item_width(200)
 
@@ -5081,39 +5052,31 @@ class TrackerViewer(SequenceOBBViewer):
             "Per-Frame 3DBB Conf", self.raw_conf_threshold, 0.0, 1.0
         )
         if tracked_show_changed:
-            # Display-only confidence filtering should update immediately.
             self._rebuild_current_view()
         if raw_det_changed:
-            # Keep base raw-render shader threshold aligned with incoming raw filter.
             self.prob_threshold = self.raw_conf_threshold
             self._params_dirty_time = time_module.time()
-        _changed, self.tracker_samp_per_dim = imgui.slider_int(
-            "IoU Samples", self.tracker_samp_per_dim, 1, 32
-        )
-        _changed, self.tracker_max_missed = imgui.slider_int(
-            "Max Missed", self.tracker_max_missed, 1, 500
-        )
-        _changed, self.tracker_merge_iou = imgui.slider_float(
-            "Merge IoU", self.tracker_merge_iou, 0.0, 1.0
-        )
-        _changed, self.tracker_merge_sem = imgui.slider_float(
-            "Merge Sem", self.tracker_merge_sem, 0.0, 1.0
-        )
-        _changed, self.tracker_merge_iou_2d = imgui.slider_float(
-            "Merge IoU 2D", self.tracker_merge_iou_2d, 0.0, 1.0
-        )
-        _changed, self.tracker_merge_giou = imgui.slider_float(
-            "Merge GIoU", self.tracker_merge_giou, 0.0, 1.0
-        )
-        _changed, self.tracker_merge_interval = imgui.slider_int(
-            "Merge Interval", self.tracker_merge_interval, 1, 50
-        )
-        _changed, self.tracker_min_conf_mass = imgui.slider_float(
-            "Min Conf Mass", self.tracker_min_conf_mass, 0.5, 20.0
-        )
-        _changed, self.tracker_min_obs_points = imgui.slider_int(
-            "Min Obs Points", self.tracker_min_obs_points, 1, 20
-        )
+
+        if imgui.tree_node("Advanced Tracker"):
+            _changed, self.tracker_merge_iou = imgui.slider_float(
+                "Merge IoU", self.tracker_merge_iou, 0.0, 1.0
+            )
+            _changed, self.tracker_merge_sem = imgui.slider_float(
+                "Merge Sem", self.tracker_merge_sem, 0.0, 1.0
+            )
+            _changed, self.tracker_merge_iou_2d = imgui.slider_float(
+                "Merge IoU 2D", self.tracker_merge_iou_2d, 0.0, 1.0
+            )
+            _changed, self.tracker_merge_interval = imgui.slider_int(
+                "Merge Interval", self.tracker_merge_interval, 1, 50
+            )
+            _changed, self.tracker_min_conf_mass = imgui.slider_float(
+                "Min Conf Mass", self.tracker_min_conf_mass, 0.5, 20.0
+            )
+            _changed, self.tracker_min_obs_points = imgui.slider_int(
+                "Min Obs Points", self.tracker_min_obs_points, 1, 20
+            )
+            imgui.tree_pop()
 
         imgui.pop_item_width()
 
@@ -5158,87 +5121,49 @@ class TrackerViewer(SequenceOBBViewer):
             self._rebuild_current_view()
         imgui.pop_item_width()
 
-        _changed, self.show_text_labels = imgui.checkbox(
-            "Show Labels", self.show_text_labels
-        )
-        _changed, self.show_debug_text = imgui.checkbox(
-            "Debug Text", self.show_debug_text
-        )
-        _changed, self.debug_visibility = imgui.checkbox(
-            "Debug Visibility", self.debug_visibility
-        )
-        _changed, self.show_axis_lines = imgui.checkbox(
-            "Show Axis Lines (RGB=XYZ)", self.show_axis_lines
-        )
         _changed, self.show_trajectory = imgui.checkbox(
             "Show Trajectory", self.show_trajectory
         )
         _changed, self.show_frustum = imgui.checkbox("Show Frustum", self.show_frustum)
-        if getattr(self, "_rgb_images", None) is not None:
-            _changed, self.show_rgb_obbs = imgui.checkbox(
-                "Show RGB OBBs", self.show_rgb_obbs
-            )
-            _changed, self.show_rgb_labels = imgui.checkbox(
-                "Show RGB Labels", self.show_rgb_labels
-            )
-            _vis_changed, self.show_rgb_visible_only = imgui.checkbox(
-                "RGB Visible Only", self.show_rgb_visible_only
-            )
-            if _vis_changed:
-                self._rebuild_current_view()
-            # Semi-dense point color dropdown
-            if self.point_count > 0:
-                imgui.push_item_width(200)
-                imgui.pop_item_width()
-            imgui.push_item_width(200)
-            _changed, self.rgb_obb_thickness = imgui.slider_float(
-                "RGB 3DBB Width", self.rgb_obb_thickness, 1.0, 10.0
-            )
-            _changed, self.rgb_bb2_thickness = imgui.slider_float(
-                "RGB 2DBB Width", self.rgb_bb2_thickness, 1.0, 10.0
-            )
-            _changed, self.rgb_text_scale = imgui.slider_float(
-                "RGB Text Scale", self.rgb_text_scale, 0.5, 5.0
-            )
-            cap_changed, self.rgb_max_projected_boxes = imgui.slider_int(
-                "RGB Max Boxes", self.rgb_max_projected_boxes, 32, 2000
-            )
-            if cap_changed:
-                self._rebuild_current_view()
-            imgui.pop_item_width()
-
         _changed, self.show_bb2_panel = imgui.checkbox(
             "Show 2DBB Panel", self.show_bb2_panel
         )
-        if self._bb2d_data is not None:
-            _changed, self.show_bb2_csv = imgui.checkbox(
-                "Show BB2 CSV", self.show_bb2_csv
-            )
-            _changed, self.overlay_bb2d = imgui.checkbox(
-                "Overlay 2D BBs", self.overlay_bb2d
+        if getattr(self, "_rgb_images", None) is not None:
+            _changed, self.show_rgb_labels = imgui.checkbox(
+                "Show RGB Labels", self.show_rgb_labels
             )
 
-        imgui.push_item_width(200)
-        _changed, self.traj_alpha = imgui.slider_float(
-            "Traj Alpha", self.traj_alpha, 0.0, 1.0
-        )
-        changed, self.traj_tail_secs = imgui.slider_float(
-            "Traj Tail (s)", self.traj_tail_secs, 0.5, 30.0
-        )
-        if changed and self._traj_all_segments is not None and self.total_frames > 0:
-            ts = self.sorted_timestamps[self.current_frame_idx]
-            self._update_trajectory_tail(ts)
-        changed, self.frustum_scale = imgui.slider_float(
-            "Frustum Scale", self.frustum_scale, 0.001, 0.5
-        )
-        if changed and self.total_frames > 0:
-            # Rebuild frustum with new scale
-            ts = self.sorted_timestamps[self.current_frame_idx]
-            cam, T_wr = self._get_cam_and_pose(ts)
-            self._build_frustum_geometry(cam, T_wr)
-        imgui.pop_item_width()
+        if imgui.tree_node("Advanced Visuals"):
+            imgui.push_item_width(200)
+            _changed, self.traj_alpha = imgui.slider_float(
+                "Traj Alpha", self.traj_alpha, 0.0, 1.0
+            )
+            changed, self.traj_tail_secs = imgui.slider_float(
+                "Traj Tail (s)", self.traj_tail_secs, 0.5, 30.0
+            )
+            if changed and self._traj_all_segments is not None and self.total_frames > 0:
+                ts = self.sorted_timestamps[self.current_frame_idx]
+                self._update_trajectory_tail(ts)
+            changed, self.frustum_scale = imgui.slider_float(
+                "Frustum Scale", self.frustum_scale, 0.001, 0.5
+            )
+            if changed and self.total_frames > 0:
+                ts = self.sorted_timestamps[self.current_frame_idx]
+                cam, T_wr = self._get_cam_and_pose(ts)
+                self._build_frustum_geometry(cam, T_wr)
+            if getattr(self, "_rgb_images", None) is not None:
+                _changed, self.rgb_obb_thickness = imgui.slider_float(
+                    "RGB 3DBB Width", self.rgb_obb_thickness, 1.0, 10.0
+                )
+                _changed, self.rgb_text_scale = imgui.slider_float(
+                    "RGB Text Scale", self.rgb_text_scale, 0.5, 5.0
+                )
+            imgui.pop_item_width()
+            imgui.tree_pop()
 
+        # === Points ===
         if self.point_count > 0:
+            self._section_header("Points")
             _changed, self.show_global_points = imgui.checkbox(
                 "Show Global Points", self.show_global_points
             )
@@ -5265,25 +5190,9 @@ class TrackerViewer(SequenceOBBViewer):
                 _changed, self.obs_trail_secs = imgui.slider_float(
                     "Obs Tail", self.obs_trail_secs, 0.0, 5.0
                 )
-                _changed, self.visibility_obs_trail_frames = imgui.slider_int(
-                    "Vis Obs Trail Frames", self.visibility_obs_trail_frames, 1, 30
-                )
-                if getattr(self, "_data_source", None) == "scannet":
-                    _changed, self._scannet_debug_points = imgui.checkbox(
-                        "ScanNet Point Debug", self._scannet_debug_points
-                    )
                 imgui.pop_item_width()
 
         self._section_header("Camera")
-        if imgui.button("Focus on Scene"):
-            self._focus_on_scene()
-        imgui.same_line()
-        if imgui.button("Screenshot"):
-            self._save_screenshot()
-        imgui.same_line()
-        if imgui.button("Save View"):
-            self._save_camera_view()
-
         _changed, self.follow_view = imgui.checkbox("Follow View", self.follow_view)
 
         if self.follow_view:
@@ -5538,35 +5447,6 @@ class TrackerViewer(SequenceOBBViewer):
                                 draw_list.add_line(
                                     x0, y0, x1, y1, col, self.rgb_obb_thickness + 1.0
                                 )
-            # Overlay 2D BBs on bottom RGB panel with low alpha
-            if self.overlay_bb2d and self._bb2d_current_boxes:
-                csv_w, csv_h = self._bb2d_img_wh
-                if csv_w > 0 and csv_h > 0:
-                    csv_sx = draw_w / csv_w
-                    csv_sy = draw_h / csv_h
-                else:
-                    csv_sx = scale_x
-                    csv_sy = scale_y
-                draw_list = imgui.get_window_draw_list()
-                use_random_col = self.track_color_mode == 4
-                default_col = imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 0.2)
-                for x1, y1, x2, y2, label, sem_id in self._bb2d_current_boxes:
-                    if use_random_col:
-                        if sem_id >= 0 and sem_id in BOXY_SEM2NAME:
-                            key = f"sem:{sem_id}:{BOXY_SEM2NAME[sem_id]}"
-                        else:
-                            key = f"lbl:{label.strip().lower()}"
-                        r, g, b = self._label_to_theme_random_color(key)
-                        col = imgui.get_color_u32_rgba(r, g, b, 0.2)
-                    else:
-                        col = default_col
-                    rx0 = img_min.x + x1 * csv_sx
-                    ry0 = img_min.y + y1 * csv_sy
-                    rx1 = img_min.x + x2 * csv_sx
-                    ry1 = img_min.y + y2 * csv_sy
-                    draw_list.add_rect(
-                        rx0, ry0, rx1, ry1, col, 0.0, 0, self.rgb_bb2_thickness
-                    )
             if self.show_rgb_tracked_visible:
                 self._rgb_projected_labels = list(
                     self._rgb_projected_tracked_visible_labels

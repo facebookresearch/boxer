@@ -36,7 +36,7 @@ from utils.fuse_3d_boxes import (
 )
 from tw.obb import ObbTW, iou_mc7
 from tw.pose import PoseTW, rotation_from_euler
-from utils.tensor_utils import (
+from tw.tensor_utils import (
     pad_string,
     string2tensor,
     tensor2string,
@@ -95,9 +95,7 @@ class BoundingBox3DTracker:
         merge_iou_threshold: float = 0.5,
         merge_semantic_threshold: float = 0.7,
         merge_iou_2d_threshold: float = 0.7,
-        merge_giou_threshold: float = 0.35,
         merge_interval: int = 5,
-        use_giou: bool = False,
         min_confidence_mass: float = 4.0,
         min_obs_points: int = 2,
         verbose: bool = True,
@@ -116,7 +114,6 @@ class BoundingBox3DTracker:
             merge_iou_threshold: Min IoU between tracks to consider merging (0 = disabled)
             merge_semantic_threshold: Min cosine similarity between track labels to allow merge
             merge_iou_2d_threshold: Min 2D IoU (projected) between tracks to consider merging as secondary criterion
-            merge_giou_threshold: Min GIoU (rescaled 0-1) between tracks to consider merging as fallback for thin/flat objects
             merge_interval: Run merge every N frames (1 = every frame, 10 = every 10th frame)
             min_confidence_mass: Accumulated confidence to promote TENTATIVE -> ACTIVE (alternative to min_hits)
         """
@@ -130,9 +127,7 @@ class BoundingBox3DTracker:
         self.merge_iou_threshold = merge_iou_threshold
         self.merge_semantic_threshold = merge_semantic_threshold
         self.merge_iou_2d_threshold = merge_iou_2d_threshold
-        self.merge_giou_threshold = merge_giou_threshold
         self.merge_interval = merge_interval
-        self.use_giou = use_giou
         self.min_confidence_mass = min_confidence_mass
         self.min_obs_points = min_obs_points
         self.verbose = verbose
@@ -231,13 +226,8 @@ class BoundingBox3DTracker:
                 detections_gpu,
                 samp_per_dim=self.samp_per_dim,
                 verbose=False,
-                use_giou=self.use_giou,
             )
-            # When use_giou=True, iou_mc7 returns (iou, giou) — we only need iou here
-            if isinstance(iou_result, tuple):
-                iou_matrix = iou_result[0].cpu()
-            else:
-                iou_matrix = iou_result.cpu()  # (V, N)
+            iou_matrix = iou_result.cpu()  # (V, N)
             t_iou = time.perf_counter()
 
             # Build cost matrix for Hungarian assignment
@@ -248,7 +238,7 @@ class BoundingBox3DTracker:
             cost_matrix[invalid_mask] = 1e6
 
             # Hungarian assignment
-            from utils.hungarian import linear_sum_assignment
+            from utils.fuse_3d_boxes import linear_sum_assignment
             row_ind, col_ind = linear_sum_assignment(cost_matrix)
             t_hungarian = time.perf_counter()
 
@@ -699,17 +689,11 @@ class BoundingBox3DTracker:
         all_stacked = ObbTW(
             torch.stack([t.obb._data.squeeze() for t in all_candidates])
         )
-        result = iou_mc7(
+        iou_matrix = iou_mc7(
             visible_stacked,
             all_stacked,
             samp_per_dim=self.samp_per_dim,
-            use_giou=True,
-        )  # returns (iou, giou) tuple
-        if isinstance(result, tuple):
-            iou_matrix, giou_matrix = result
-        else:
-            iou_matrix = result
-            giou_matrix = None
+        )
 
         # V×N semantic similarity (cached embeddings, cheap)
         vis_embeddings = torch.stack(
@@ -790,25 +774,18 @@ class BoundingBox3DTracker:
                 if vis_to_all_idx[i] == j:
                     continue
 
-                # Primary: 3D IoU. Secondary: 2D IoU. Fallback: GIoU (for thin/flat objects).
+                # Primary: 3D IoU. Secondary: 2D IoU.
                 has_3d_overlap = iou_matrix[i, j] >= self.merge_iou_threshold
-                has_giou_overlap = (
-                    giou_matrix is not None
-                    and giou_matrix[i, j] >= self.merge_giou_threshold
-                )
                 has_2d_overlap = (
                     iou_2d_matrix is not None
                     and iou_2d_matrix[i, j] >= self.merge_iou_2d_threshold
                 )
-                if not has_3d_overlap and not has_giou_overlap and not has_2d_overlap:
+                if not has_3d_overlap and not has_2d_overlap:
                     continue
 
-                # Semantic check: required for 3D IoU and 2D IoU paths, but NOT for GIoU.
-                # GIoU merges rely on spatial proximity alone — thin objects with
-                # different labels like "booklet"/"gameboard" should still merge.
-                if not has_giou_overlap:
-                    if sem_matrix[i, j] < self.merge_semantic_threshold:
-                        continue
+                # Semantic check
+                if sem_matrix[i, j] < self.merge_semantic_threshold:
+                    continue
 
                 # Absorb weaker (lower accumulated_weight) into stronger
                 if (

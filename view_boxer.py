@@ -10,7 +10,7 @@ import sys
 
 import numpy as np
 import torch
-from utils.settings import EVAL_PATH
+from utils.demo_utils import EVAL_PATH
 from utils.demo_utils import DEFAULT_SEQ, expand_seq_shorthand, handle_input
 from utils.file_io import read_obb_csv
 from loaders.omni_loader import OMNI3D_DATASETS

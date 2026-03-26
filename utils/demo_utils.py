@@ -5,6 +5,9 @@ from typing import Optional
 
 import torch
 
+EVAL_PATH = os.path.expanduser("~/viz_boxer")
+CKPT_PATH = os.path.expanduser("~/data/boxer")
+
 # Shorthand sequence name mappings
 SEQ_SHORTHANDS = {
     "hohen": "Hohenwaldeckstr45-02",

@@ -3,7 +3,7 @@
 import torch
 from tw.obb import make_obb, ObbTW
 from tw.pose import PoseTW
-from utils.tensor_utils import pad_string, string2tensor
+from tw.tensor_utils import pad_string, string2tensor
 from utils.track_3d_boxes import (
     BoundingBox3DTracker,
     TrackedInstance,

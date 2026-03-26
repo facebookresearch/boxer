@@ -18,7 +18,7 @@ from utils.taxonomy import (
     SSI_NAME2SEM,
     SSI_SEM2NAME,
 )
-from utils.tensor_utils import (
+from tw.tensor_utils import (
     find_nearest,
     pad_string,
     string2tensor,

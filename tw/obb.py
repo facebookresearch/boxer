@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from .camera import CameraTW
 from .pose import IdentityPose, PoseTW, rotation_from_euler
-from utils.tensor_utils import pad_string, tensor2string, unpad_string
+from tw.tensor_utils import pad_string, tensor2string, unpad_string
 from .tensor_wrapper import autocast, autoinit, smart_cat, smart_stack, TensorWrapper
 
 # OBB corner numbering diagram for this implementation (the same as pytorch3d

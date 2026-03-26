@@ -12,7 +12,7 @@ from tqdm import tqdm
 from tw.camera import CameraTW, get_base_aria_rgb_camera
 from tw.obb import ObbTW
 from tw.pose import PoseTW
-from utils.tensor_utils import pad_string, string2tensor
+from tw.tensor_utils import pad_string, string2tensor
 
 
 def _fishify(image, cam_pin, cam_fish):

@@ -8,7 +8,7 @@ import os
 
 import torch
 from view_boxer import launch_viewer, read_obb_csv, resolve_input, subsample_timed_obbs
-from utils.settings import EVAL_PATH
+from utils.demo_utils import EVAL_PATH
 from utils.demo_utils import DEFAULT_SEQ
 
 

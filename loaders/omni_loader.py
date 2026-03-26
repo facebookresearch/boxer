@@ -7,11 +7,11 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
-from utils.settings import EVAL_PATH
+from utils.demo_utils import EVAL_PATH
 from tw.camera import CameraTW, get_base_aria_rgb_camera
 from tw.obb import ObbTW
 from tw.pose import PoseTW
-from utils.tensor_utils import pad_string, string2tensor
+from tw.tensor_utils import pad_string, string2tensor
 
 # Supported Omni3D datasets
 OMNI3D_DATASETS = [

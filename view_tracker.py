@@ -79,7 +79,6 @@ def main():
                 init_follow_behind=args.init_follow_behind,
                 init_follow_above=args.init_follow_above,
                 init_follow_look_ahead=args.init_follow_look_ahead,
-                init_overlay2d=True,
                 init_show_obs=args.init_show_obs,
                 init_image_panel_width=args.init_image_panel_width,
                 autorecord=args.autorecord,

@@ -21,11 +21,12 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional
 
+import numpy as np
 import torch
 from utils.file_io import ObbCsvWriter2, read_obb_csv
-from tw.obb import make_obb, ObbTW, iou_mc7, iou_mc7_sparse
+from tw.obb import ObbTW, iou_mc7, iou_mc7_sparse
 from tw.pose import PoseTW, rotation_from_euler
-from utils.tensor_utils import (
+from tw.tensor_utils import (
     pad_string,
     string2tensor,
     tensor2string,
@@ -685,46 +686,6 @@ class BoundingBox3DFuser:
 
         return instances
 
-    def _fuse_poses(self, poses: list[PoseTW], weights: torch.Tensor) -> PoseTW:
-        """
-        Fuse poses using weighted averaging of translations and rotations.
-        Accounts for 180-degree yaw symmetry by aligning rotations before averaging.
-
-        Args:
-            poses: List of M PoseTW objects
-            weights: (M,) tensor of fusion weights
-
-        Returns:
-            Fused PoseTW
-        """
-
-        if isinstance(poses, list):
-            poses = torch.stack(poses)  # (M, 7)
-
-        # Extract translations and rotations
-        translations = torch.stack([pose.t for pose in poses])  # (M, 3)
-
-        # Fuse translations (weighted average)
-        weights_t = weights.view(-1, 1).expand_as(translations)
-        fused_translation = (translations * weights_t).sum(dim=0)  # (3,)
-
-        # Assert rotations have only yaw component.
-        eulers = poses.to_euler()
-        assert torch.allclose(eulers[:, 0], eulers[:, 1]), "Rotations must be pure yaw"
-
-        yaw_angles = eulers[:, 2]  # (M,)
-
-        # Compute weighted mean of yaw angles
-        mean_yaw_angle, _ = self._weighted_yaw_mean(yaw_angles, weights)
-
-        # Create fused rotation matrix
-        new_eulers = torch.tensor([0, 0, mean_yaw_angle]).to(translations)  # (3,)
-        new_eulers = new_eulers.reshape(1, 3)  # (1, 3)
-        fused_rotation = rotation_from_euler(new_eulers)[0]
-        fused_pose = PoseTW.from_Rt(fused_rotation, fused_translation)
-
-        return fused_pose
-
     def _weighted_yaw_mean(
         self, angles: torch.Tensor, weights: torch.Tensor, eps: float = 1e-8
     ):
@@ -886,127 +847,6 @@ class BoundingBox3DFuser:
             Filtered list of instances after NMS
         """
         return apply_nms_to_fused_instances(instances, self.nms_iou_threshold)
-
-    def _compute_fusion_weights(self, detections: ObbTW) -> torch.Tensor:
-        """
-        Compute weights for fusing detections based on confidence.
-
-        Args:
-            detections: ObbTW detections to fuse (M, 165)
-
-        Returns:
-            Torch tensor of weights (sums to 1)
-        """
-        confidences = detections.prob.squeeze()  # (M,)
-
-        if self.confidence_weighting == "uniform":
-            weights = torch.ones_like(confidences)
-        elif self.confidence_weighting == "linear":
-            weights = confidences
-        elif self.confidence_weighting == "quadratic":
-            weights = confidences**2
-        elif self.confidence_weighting == "robust":
-            # RANSAC-like robust weighting: down-weight outliers
-            weights = self._compute_robust_weights(detections, confidences)
-        else:
-            raise ValueError(
-                f"Unknown confidence weighting: {self.confidence_weighting}"
-            )
-
-        # Normalize to sum to 1
-        weights = weights / (weights.sum() + 1e-8)
-
-        return weights
-
-    def _compute_robust_weights(
-        self, detections: ObbTW, confidences: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Compute robust weights using RANSAC-like outlier detection.
-
-        Down-weights detections that are outliers based on:
-        1. Position deviation from cluster median
-        2. Size deviation from cluster median
-        3. Yaw angle deviation from cluster consensus
-
-        Uses Median Absolute Deviation (MAD) for robust outlier detection.
-
-        Args:
-            detections: ObbTW detections in cluster (M, 165)
-            confidences: Base confidence scores (M,)
-
-        Returns:
-            Robust weights (M,) that down-weight outliers
-        """
-        M = len(detections)
-        if M <= 2:
-            # Not enough data for robust statistics, use confidence only
-            return confidences
-
-        # Extract positions, sizes, and yaw angles
-        poses = detections.T_world_object
-        translations = torch.stack([pose.t for pose in poses])  # (M, 3)
-
-        extents = detections.bb3_object  # (M, 6)
-        sizex = extents[:, 1] - extents[:, 0]
-        sizey = extents[:, 3] - extents[:, 2]
-        sizez = extents[:, 5] - extents[:, 4]
-        sizes = torch.stack([sizex, sizey, sizez], dim=1)  # (M, 3)
-
-        eulers = poses.to_euler()  # (M, 3)
-        yaw_angles = eulers[:, 2]  # (M,)
-
-        # Compute robust statistics using median
-        median_position = torch.median(translations, dim=0).values  # (3,)
-        median_size = torch.median(sizes, dim=0).values  # (3,)
-
-        # For yaw: use circular mean with 180° symmetry
-        mean_yaw, _ = self._weighted_yaw_mean(yaw_angles, torch.ones_like(yaw_angles))
-
-        # Compute deviations
-        position_deviations = torch.norm(translations - median_position, dim=1)  # (M,)
-        size_deviations = torch.norm(sizes - median_size, dim=1)  # (M,)
-
-        # Yaw deviations accounting for 180° symmetry
-        yaw_deviations = torch.tensor(
-            [self._angular_distance(yaw.item(), mean_yaw.item()) for yaw in yaw_angles],
-            device=yaw_angles.device,
-        )
-
-        # Compute MAD (Median Absolute Deviation) for robust outlier detection
-        mad_position = torch.median(position_deviations)
-        mad_size = torch.median(size_deviations)
-        mad_yaw = torch.median(yaw_deviations)
-
-        # Avoid division by zero
-        mad_position = max(mad_position, 1e-6)
-        mad_size = max(mad_size, 1e-6)
-        mad_yaw = max(mad_yaw, 1e-6)
-
-        # Normalized deviations (similar to z-scores but robust)
-        # Scale factor 1.4826 makes MAD consistent with std for normal distribution
-        scale = 1.4826
-        normalized_position = position_deviations / (scale * mad_position)
-        normalized_size = size_deviations / (scale * mad_size)
-        normalized_yaw = yaw_deviations / (scale * mad_yaw)
-
-        # Combined outlier score (higher = more likely to be outlier)
-        outlier_score = (normalized_position + normalized_size + normalized_yaw) / 3.0
-
-        # Convert outlier score to weights using Huber-like function
-        # Detections with outlier_score > threshold are down-weighted
-        threshold = 2.5  # Similar to 2.5 sigma in normal distribution
-        inlier_weights = torch.where(
-            outlier_score <= threshold,
-            torch.ones_like(outlier_score),  # Inliers get full weight
-            threshold / outlier_score,  # Outliers get reduced weight
-        )
-
-        # Combine with original confidence scores
-        robust_weights = confidences * inlier_weights
-
-        return robust_weights
-
 
 def apply_nms_to_fused_instances(
     instances: list[FusedInstance],
@@ -1196,73 +1036,91 @@ def main() -> None:
     )
 
 
-def _create_example_detections() -> ObbTW:
-    """Create example ObbTW detections for testing using make_obb."""
-    obbs_list = []
+def linear_sum_assignment(cost_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Find minimum cost assignment using the Hungarian algorithm.
 
-    # Group 1: Three similar "chair" detections with slight position noise
-    # All at roughly the same location with small random offsets
-    for _ in range(3):
-        noise_x = torch.randn(1).item() * 0.1
-        noise_y = torch.randn(1).item() * 0.1
-        noise_z = torch.randn(1).item() * 0.05
-        noise_yaw = torch.randn(1).item() * 1
+    Args:
+        cost_matrix: (n, m) cost matrix. Can be rectangular.
 
-        obb = make_obb(
-            sz=[1.0, 0.3, 1.0],
-            position=[0.5 + noise_x, 0.5 + noise_y, 0.5 + noise_z],
-            prob=0.5 + torch.rand(1).item() * 0.15,
-            yaw=0.1 + noise_yaw,
-        )
-        obbs_list.append(obb)
+    Returns:
+        Tuple of (row_indices, col_indices) for the optimal assignment.
+    """
+    cost = np.array(cost_matrix, dtype=np.float64)
+    n, m = cost.shape
+    if n == 0 or m == 0:
+        return np.array([], dtype=int), np.array([], dtype=int)
 
-    for _ in range(8):
-        noise_x = torch.randn(1).item() * 0.1
-        noise_y = torch.randn(1).item() * 0.3
-        noise_z = torch.randn(1).item() * 0.05
-        noise_yaw = torch.randn(1).item() * 2
+    # Transpose if more rows than columns (algorithm needs n <= m)
+    transposed = False
+    if n > m:
+        cost = cost.T
+        n, m = m, n
+        transposed = True
 
-        noise_sx = torch.randn(1).item() * 0.1
-        noise_sy = torch.randn(1).item() * 0.1
-        noise_sz = torch.randn(1).item() * 0.1
+    # Pad to square if needed
+    if n < m:
+        cost = np.vstack([cost, np.full((m - n, m), 0.0)])
 
-        obb = make_obb(
-            sz=[2.2 + noise_sx, 1.0 + noise_sy, 1.0 + noise_sz],
-            position=[-0.5 + noise_x, -0.5 + noise_y, -0.5 + noise_z],
-            prob=0.2 + torch.rand(1).item() * 0.15,
-            yaw=2.0 + noise_yaw,
-        )
-        obbs_list.append(obb)
+    size = m
+    u = np.zeros(size + 1)
+    v = np.zeros(size + 1)
+    p = np.zeros(size + 1, dtype=int)
+    way = np.zeros(size + 1, dtype=int)
 
-    for _ in range(20):
-        noise_x = torch.randn(1).item() * 0.2
-        noise_y = torch.randn(1).item() * 0.1
-        noise_z = torch.randn(1).item() * 0.05
-        noise_yaw = torch.randn(1).item() * 0.1
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = np.full(size + 1, np.inf)
+        used = np.zeros(size + 1, dtype=bool)
 
-        noise_sx = torch.randn(1).item() * 0.1
-        noise_sy = torch.randn(1).item() * 0.1
-        noise_sz = torch.randn(1).item() * 0.1
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = np.inf
+            j1 = -1
 
-        obb = make_obb(
-            sz=[1.0 + noise_sx, 2.0 + noise_sy, 1.0 + noise_sz],
-            position=[-2.5 + noise_x, 2.5 + noise_y, -0.0 + noise_z],
-            prob=0.4 + torch.rand(1).item() * 0.3,
-            yaw=5.0 + noise_yaw,
-        )
-        obbs_list.append(obb)
+            for j in range(1, size + 1):
+                if not used[j]:
+                    cur = cost[i0 - 1, j - 1] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j] = cur
+                        way[j] = j0
+                    if minv[j] < delta:
+                        delta = minv[j]
+                        j1 = j
 
-    # Group 2: One "table" detection (different location)
-    obb = make_obb(
-        sz=[1.5, 1.5, 0.8],
-        position=[5.0, 0.5, 0.4],
-        prob=0.5,
-        yaw=1.2,
-    )
-    obbs_list.append(obb)
+            for j in range(size + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
 
-    all_obbs = torch.stack(obbs_list)
-    return all_obbs
+            j0 = j1
+            if p[j0] == 0:
+                break
+
+        while j0:
+            p[j0] = p[way[j0]]
+            j0 = way[j0]
+
+    # Extract assignment
+    row_ind = []
+    col_ind = []
+    for j in range(1, size + 1):
+        if p[j] != 0 and p[j] <= n:
+            row_ind.append(p[j] - 1)
+            col_ind.append(j - 1)
+
+    row_ind = np.array(row_ind, dtype=int)
+    col_ind = np.array(col_ind, dtype=int)
+
+    if transposed:
+        row_ind, col_ind = col_ind, row_ind
+
+    # Sort by row index
+    order = np.argsort(row_ind)
+    return row_ind[order], col_ind[order]
 
 
 if __name__ == "__main__":

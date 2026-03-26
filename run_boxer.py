@@ -9,9 +9,10 @@ import re
 import cv2
 import numpy as np
 import torch
-from utils.settings import CKPT_PATH, EVAL_PATH
 from boxernet.boxernet import BoxerNet
 from utils.demo_utils import (
+    CKPT_PATH,
+    EVAL_PATH,
     CudaTimer,
     DEFAULT_SEQ,
     expand_seq_shorthand,
@@ -20,15 +21,9 @@ from utils.demo_utils import (
 
 
 from utils.file_io import ObbCsvWriter2, read_obb_csv, load_bb2d_csv, save_bb2d_csv
-from utils.image import put_text, torch2cv2
-
-from utils.render import (
-    draw_bb3s,
-    render_bb2,
-    render_depth_patches,
-)
+from utils.image import put_text, torch2cv2, draw_bb3s, render_bb2, render_depth_patches
 from utils.taxonomy import load_text_labels
-from utils.tensor_utils import (
+from tw.tensor_utils import (
     pad_string,
     string2tensor,
     tensor2string,
