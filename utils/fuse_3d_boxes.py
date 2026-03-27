@@ -184,12 +184,32 @@ class FusedInstance:
     detection_indices: List[int]
 
 
+def _load_cached_text_embeddings():
+    """Try to load cached text embeddings from OWL checkpoint cache files.
+
+    Returns:
+        Dict mapping text string -> embedding tensor, or None if no cache found.
+    """
+    import glob as glob_mod
+    ckpts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ckpts")
+    cache_files = glob_mod.glob(os.path.join(ckpts_dir, "owlv2-*_textemb_*.pt"))
+    if not cache_files:
+        return None
+    cached = torch.load(cache_files[0], map_location="cpu", weights_only=False)
+    if not isinstance(cached, dict) or "prompts" not in cached or "embeddings" not in cached:
+        return None
+    prompts = cached["prompts"]
+    embeddings = cached["embeddings"]
+    return {text: embeddings[i] for i, text in enumerate(prompts)}
+
+
 def precompute_semantic_embeddings(
     obbs: ObbTW, device: Optional[str] = None
 ) -> torch.Tensor:
-    """Precompute semantic embeddings for all OBBs (one-time operation with GPU acceleration).
+    """Precompute semantic embeddings for all OBBs.
 
-    Uses caching to avoid recomputing embeddings for duplicate text strings.
+    Tries to load from OWL's cached text embeddings first (avoids loading
+    the 881MB checkpoint). Falls back to TextEmbedder if cache miss.
 
     Args:
         obbs: ObbTW tensor containing all detections
@@ -201,76 +221,40 @@ def precompute_semantic_embeddings(
     if len(obbs) == 0:
         return torch.empty(0, 512)
 
-    print(f"\n{'=' * 60}")
-    print("PRECOMPUTING SEMANTIC EMBEDDINGS")
-    print(f"{'=' * 60}")
-
-    # Get all text labels
+    # Get all text labels and find unique ones
     text_strings = obbs.text_string()
     total_count = len(text_strings)
-
-    # Find unique texts and build mapping
     unique_texts = []
-    text_to_idx = {}  # Maps text -> index in unique_texts
-    text_indices = []  # Maps each OBB -> index in unique_texts
-
+    text_to_idx = {}
+    text_indices = []
     for text in text_strings:
         if text not in text_to_idx:
             text_to_idx[text] = len(unique_texts)
             unique_texts.append(text)
         text_indices.append(text_to_idx[text])
-
     unique_count = len(unique_texts)
-    duplicate_count = total_count - unique_count
 
-    print(f"Total detections: {total_count}")
-    print(f"Unique texts: {unique_count}")
-    print(
-        f"Duplicates avoided: {duplicate_count} ({100 * duplicate_count / total_count:.1f}%)"
-    )
+    print(f"Semantic embeddings: {total_count} detections, {unique_count} unique texts")
 
-    # Show first few unique examples
-    for i, text in enumerate(unique_texts[:5]):
-        count = sum(1 for t in text_strings if t == text)
-        print(f"  [{i}] {text} (x{count})")
-    if unique_count > 5:
-        print(f"  ... and {unique_count - 5} more unique texts")
-
-    # Auto-detect device if not specified
-    if device is None:
-        if torch.cuda.is_available():
-            device = "cuda"
-        elif torch.backends.mps.is_available():
-            device = "mps"
+    # Try cached embeddings from OWL
+    cache = _load_cached_text_embeddings()
+    if cache is not None:
+        missing = [t for t in unique_texts if t not in cache]
+        if not missing:
+            print(f"  Loaded all {unique_count} embeddings from OWL cache")
+            unique_embeddings = torch.stack([cache[t] for t in unique_texts])
+            text_indices_tensor = torch.tensor(text_indices, dtype=torch.long)
+            return unique_embeddings[text_indices_tensor]
         else:
-            device = "cpu"
+            print(f"  Cache miss for {len(missing)} texts, falling back to TextEmbedder")
 
-    print(f"Using device: {device}")
-
-    # Initialize model
-    try:
-        from owl.clip_tokenizer import TextEmbedder
-    except ImportError:
-        raise ImportError("condense_text module not available")
-
+    # Fallback: load TextEmbedder (loads 881MB checkpoint)
+    from owl.clip_tokenizer import TextEmbedder
     model = TextEmbedder()
-
-    # Compute embeddings only for unique texts
-    import time
-
-    start_time = time.time()
-    unique_embeddings = model.forward(unique_texts)  # (unique_count, embed_dim)
-    elapsed_time = time.time() - start_time
-
-    # Expand embeddings back to full size using indices
+    unique_embeddings = model.forward(unique_texts)
     text_indices_tensor = torch.tensor(text_indices, dtype=torch.long)
-    embeddings = unique_embeddings[text_indices_tensor]  # (total_count, embed_dim)
-
-    print(f"\n✓ Computed {unique_count} unique embeddings in {elapsed_time:.2f}s")
-    print(f"✓ Expanded to {total_count} total embeddings")
-    print(f"  Embedding shape: {embeddings.shape}")
-    print(f"{'=' * 60}\n")
-
+    embeddings = unique_embeddings[text_indices_tensor]
+    print(f"  Computed {unique_count} embeddings via TextEmbedder")
     return embeddings
 
 

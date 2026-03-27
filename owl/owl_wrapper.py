@@ -175,11 +175,16 @@ class OwlWrapper(torch.nn.Module):
         prompt_hash = hashlib.md5("\n".join(text_prompts).encode()).hexdigest()[:12]
         cache_path = _CKPT_PATH.replace(".pt", f"_textemb_{prompt_hash}.pt")
         if os.path.exists(cache_path):
-            self.text_embeddings = torch.load(cache_path, map_location=device, weights_only=True)
+            cached = torch.load(cache_path, map_location=device, weights_only=False)
+            if isinstance(cached, dict) and "embeddings" in cached:
+                self.text_embeddings = cached["embeddings"]
+            else:
+                # Old format: raw tensor
+                self.text_embeddings = cached
             _dbg(f"load cached text embeddings ({len(text_prompts)} prompts)")
         else:
             self.text_embeddings = self._encode_text(text_prompts)
-            torch.save(self.text_embeddings.cpu(), cache_path)
+            torch.save({"prompts": text_prompts, "embeddings": self.text_embeddings.cpu()}, cache_path)
             self.text_embeddings = self.text_embeddings.to(device)
             _dbg(f"encode_text ({len(text_prompts)} prompts) + save cache")
         self.query_mask = torch.ones(len(text_prompts), dtype=torch.bool, device=device)

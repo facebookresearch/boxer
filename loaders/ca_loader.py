@@ -52,10 +52,6 @@ def _load_world_obbs(data_dir):
         [category_to_sem_id[bb["category"]] for bb in bb3], dtype=torch.int64
     )
 
-    inst_id_to_caption = {}
-    for bb in bb3:
-        inst_id_to_caption[id2inst[bb["id"]]] = bb.get("caption", "")
-
     text = [string2tensor(pad_string(xx, max_len=128)) for xx in category_names]
     text = torch.stack(text)
     all_obbs = ObbTW.from_lmc(
@@ -66,7 +62,7 @@ def _load_world_obbs(data_dir):
         text=text,
     )
 
-    return all_obbs, id2inst, sem_id_to_name, inst_id_to_caption
+    return all_obbs, id2inst, sem_id_to_name
 
 
 class CALoader(BaseLoader):
@@ -102,14 +98,11 @@ class CALoader(BaseLoader):
         data_dir = os.path.dirname(os.path.dirname(world_files[0]))
 
         # Load world OBBs (lightweight, just JSON parsing).
-        all_obbs, id2inst, sem_id_to_name, inst_id_to_caption = _load_world_obbs(
-            data_dir
-        )
+        all_obbs, id2inst, sem_id_to_name = _load_world_obbs(data_dir)
         self.all_obbs = all_obbs
         self.id2inst = id2inst
         self.sem_id_to_name = sem_id_to_name
         self.sem_name_to_id = {v: k for k, v in sem_id_to_name.items()}
-        self.inst_id_to_caption = inst_id_to_caption
 
         # Discover frame timestamps from .wide directories.
         wide_dirs = glob.glob(os.path.join(data_dir, "*.wide"))
@@ -123,7 +116,6 @@ class CALoader(BaseLoader):
 
         self.data_dir = data_dir
         self.seq_name = seq_name
-        self.local_root = out_dir
         self.length = len(image_tags)
         self.index = 0
         self.camera = "rgb"
@@ -207,13 +199,11 @@ class CALoader(BaseLoader):
             width=W, height=H, type_str="pinhole", params=params
         )
 
-        # Load depth image.
-        depth = np.array(
+        # Load depth and sample semi-dense points (uniform grid subsampling).
+        depth_raw = np.array(
             Image.open(os.path.join(data_dir, image_tag + ".wide", "depth.png"))
         )
-
-        # Sample semi-dense points from depth (uniform grid subsampling).
-        depth_resize = cv2.resize(depth, (W, H), interpolation=cv2.INTER_NEAREST)
+        depth_resize = cv2.resize(depth_raw, (W, H), interpolation=cv2.INTER_NEAREST)
         depth_m = depth_resize.astype(np.float32) / 1000.0
         R_wc = RT[:3, :3].numpy().astype(np.float32)
         t_wc = RT[:3, 3].numpy().astype(np.float32)
@@ -237,7 +227,6 @@ class CALoader(BaseLoader):
 
         return {
             "image": image,
-            "depth": depth,
             "cam": cam,
             "T_wc": T_wc,
             "obbs": visible_obbs,
@@ -274,18 +263,6 @@ class CALoader(BaseLoader):
         if self.resize is not None:
             cam = cam.scale((resizeW / WW, resizeH / HH))
         datum["cam0"] = cam.float()
-
-        depth = frame["depth"]
-        depth_torch = torch.from_numpy(depth.astype(np.float32))[None, None]
-        HHd, WWd = depth_torch.shape[2:]
-        if self.resize is not None:
-            depth_torch = torch.nn.functional.interpolate(
-                depth_torch,
-                size=(resizeH, resizeW),
-                mode="bilinear",
-                align_corners=True,
-            )
-        datum["depth0"] = depth_torch
 
         T_wc = frame["T_wc"]
         T_wr = T_wc @ frame["cam"].T_camera_rig

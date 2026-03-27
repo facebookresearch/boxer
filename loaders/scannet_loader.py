@@ -342,11 +342,6 @@ class ScanNetLoader(BaseLoader):
                         depth_np, (resizeW, resizeH), interpolation=cv2.INTER_NEAREST
                     )
 
-        if depth_np is not None:
-            datum["depth0"] = torch.from_numpy(depth_np).float()[None, None]
-        else:
-            datum["depth0"] = torch.zeros(1, 1, resizeH, resizeW, dtype=torch.float32)
-
         if _debug:
             _t3 = time.perf_counter()
 

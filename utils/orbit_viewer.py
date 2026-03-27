@@ -210,34 +210,6 @@ class OrbitViewer(mglw.WindowConfig):
 
         return projection, view, mvp
 
-    def get_camera_position(self) -> np.ndarray:
-        """Get current camera position in world space."""
-        azimuth_rad = np.radians(self.camera_azimuth)
-        elevation_rad = np.radians(self.camera_elevation)
-
-        camera_x = self.camera_distance * np.cos(elevation_rad) * np.cos(azimuth_rad)
-        camera_y = self.camera_distance * np.sin(elevation_rad)
-        camera_z = self.camera_distance * np.cos(elevation_rad) * np.sin(azimuth_rad)
-
-        return self.camera_target + np.array([camera_x, camera_y, camera_z])
-
-    def render_camera_info_ui(self) -> None:
-        """Render camera information in ImGui (optional helper)."""
-        imgui.text("Camera Info:")
-        imgui.text(f"Distance: {self.camera_distance:.2f}")
-        imgui.text(f"Azimuth: {self.camera_azimuth:.1f}°")
-        imgui.text(f"Elevation: {self.camera_elevation:.1f}°")
-        imgui.text(
-            f"Target: ({self.camera_target[0]:.2f}, {self.camera_target[1]:.2f}, {self.camera_target[2]:.2f})"
-        )
-
-    def render_controls_info_ui(self) -> None:
-        """Render control instructions in ImGui (optional helper)."""
-        imgui.text("Controls:")
-        imgui.text("Left drag: Pan")
-        imgui.text("Right drag: Orbit")
-        imgui.text("Scroll: Zoom")
-
     # -----------------------------
     # MACOS WINDOW FOCUS WORKAROUND
     # -----------------------------

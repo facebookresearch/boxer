@@ -85,7 +85,7 @@ def main():
     parser.add_argument("--pinhole", action="store_true", help="rectify to pinhole")
     parser.add_argument("--camera", type=str, default="rgb", choices=["rgb", "slaml", "slamr"], help="camera to use (default: rgb)")
     parser.add_argument("--detector", type=str, default="owl", choices=["owl"], help="2D detector to use (default: owl)")
-    parser.add_argument("--thresh2d", type=float, default=0.2, help="detection confidence for 2d detector")
+    parser.add_argument("--thresh2d", type=float, default=0.25, help="detection confidence for 2d detector")
     parser.add_argument("--thresh3d", type=float, default=0.5, help="detection confidence for boxer")
     parser.add_argument("--labels", type=comma_separated_list, nargs="?", const=[], default=["lvisplus"], help="Optional comma-separated list of text prompts (e.g. --labels=small or --labels=chair,table,lamp)")
     parser.add_argument("--detector_hw", type=int, default=960, help="resize images before going into 2D detector")
@@ -548,7 +548,7 @@ def main():
             bb2_texts = [f"{l} {s:.2f}" for s, l in zip(scores2d, labels2d)]
             bb2_colors = jet_colors_bgr([1.0 - s for s in scores2d])
             bb3_texts = [f"{l} {s:.2f}" for s, l in zip(scores3d, labels3d)]
-            bb3_colors = jet_colors_bgr([1.0 - s for s in scores3d])
+            bb3_colors = jet_colors_bgr(scores3d)
 
             if DEBUG_VIZ:
                 _t1 = time.perf_counter()

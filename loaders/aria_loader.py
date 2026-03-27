@@ -1,7 +1,6 @@
 # pyre-unsafe
 import contextlib
 import os
-import sys
 import threading
 
 # Silence VRS/projectaria_tools logging before importing
@@ -428,11 +427,6 @@ class AriaLoader(BaseLoader):
 
         self.index = start_n
         self.count = 0
-        self.remove_structure = remove_structure
-
-        # OBB projection filtering stats
-        self.obb_projection_total = 0
-        self.obb_projection_valid = 0
 
         # Prefetch: load next frame in background thread
         self._prefetch_result = None
@@ -734,7 +728,6 @@ class AriaLoader(BaseLoader):
                 align_corners=True,
             )
             cam = cam_pin.float()
-            output["pinhole_uv"] = uv  # Store for depth remapping
             output["fisheye_cam"] = cam_fish  # Store fisheye cam for bb2 transformation
         else:
             # Log original calibration principal point (first frame only)
@@ -978,12 +971,6 @@ class AriaLoader(BaseLoader):
 
     def __next__(self):
         if self.index > self.end_index or self.count >= self.max_n:
-            # Print OBB projection filtering summary
-            if self.with_obb and self.obb_projection_total > 0:
-                filtered = self.obb_projection_total - self.obb_projection_valid
-                print(
-                    f"==> OBB projection filter summary: {self.obb_projection_valid}/{self.obb_projection_total} valid ({filtered} filtered)"
-                )
             raise StopIteration
 
         # Wait for prefetched result

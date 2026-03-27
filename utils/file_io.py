@@ -478,48 +478,6 @@ def load_semidense(
     return time_to_uids_slaml, time_to_uids_slamr, uid_to_p3
 
 
-def load_causal_semidense(jsonl_path, max_depth_std=0.05, max_inv_depth_std=0.005):
-    """Load causal semidense points from a .jsonl file.
-
-    Each line is a JSON object with capture_timestamp_us and per-camera observations.
-    Each observation is [trackUid, px, py, world_x, world_y, world_z, distStd, invDistStd].
-
-    Returns:
-        times_ns: np.ndarray of timestamps in nanoseconds, sorted
-        time_to_p3: dict mapping time_ns -> np.ndarray (N, 3) of world positions
-    """
-    time_to_p3 = {}
-    total_points = 0
-    filtered_points = 0
-    with open(jsonl_path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)
-            time_ns = int(record["capture_timestamp_us"]) * 1000
-            points = []
-            for cam in record.get("cameras", []):
-                for obs in cam.get("observations", []):
-                    total_points += 1
-                    dist_std = obs[6]
-                    inv_dist_std = obs[7]
-                    if dist_std > max_depth_std or inv_dist_std > max_inv_depth_std:
-                        filtered_points += 1
-                        continue
-                    points.append([obs[3], obs[4], obs[5]])
-            if points:
-                time_to_p3[time_ns] = np.array(points, dtype=np.float32)
-            else:
-                time_to_p3[time_ns] = np.zeros((0, 3), dtype=np.float32)
-    times_ns = np.array(sorted(time_to_p3.keys()))
-    kept = total_points - filtered_points
-    print(
-        f"==> Loaded causal semidense: {len(times_ns)} frames, {kept}/{total_points} points kept (dist_std<={max_depth_std}, inv_dist_std<={max_inv_depth_std})"
-    )
-    return times_ns, time_to_p3
-
-
 ## ----- ADT I/O STUFF BELOW -----
 
 
@@ -528,7 +486,6 @@ def dump_obbs_adt(
 ):
     # Write 2d_bounding_boxes.
     text = "stream_id,object_uid,timestamp[ns],x_min[pixel],x_max[pixel],y_min[pixel],y_max[pixel],visibility_ratio[%]\n"
-    count = 0
 
     # Convert all obbs to double for highest precision to keep Rs as valid rotations.
     timed_obbs = {key: val.double() for key, val in timed_obbs.items()}
@@ -759,7 +716,6 @@ def load_obbs_adt(
     else:
         instances = load_instances_adt(instance_path)
         instance_descs = None
-        instance_descs = None
 
     # Check for dynamic objects and determine which ones actually move
     dynamic_times = [t for t in T_wo_times if t != -1]
@@ -910,7 +866,6 @@ def load_obbs_adt(
         t_wo = T_wo[inst]
         inst_name = instances[inst]
         inst_id = torch.tensor(orig_to_new_id[inst]).reshape(1)
-        found = False
         sem_id = torch.tensor([-1])
         color = torch.tensor([1.0, 1.0, 1.0])
 

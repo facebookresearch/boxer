@@ -28,7 +28,6 @@ from typing import List, Optional
 
 import torch
 from utils.tw.camera import CameraTW
-from utils.file_io import ObbCsvWriter2, read_obb_csv
 from utils.fuse_3d_boxes import (
     align_boxes_r90,
     angular_distance,
@@ -39,8 +38,6 @@ from utils.tw.pose import PoseTW, rotation_from_euler
 from utils.tw.tensor_utils import (
     pad_string,
     string2tensor,
-    tensor2string,
-    unpad_string,
 )
 
 
@@ -870,42 +867,6 @@ class BoundingBox3DTracker:
             if projected_visible and contains_points:
                 track.missed_count += 1
 
-    def _age_single_track(
-        self,
-        track: TrackedInstance,
-        frame_idx: int,
-        cam: Optional[CameraTW] = None,
-        T_world_rig: Optional[PoseTW] = None,
-        observed_points: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Age a single unmatched track, using visibility-aware missed counting."""
-        frames_since_seen = frame_idx - track.last_seen_frame
-        if track.state == TrackState.ACTIVE and frames_since_seen >= 1:
-            track.state = TrackState.INACTIVE
-
-        # Visibility-aware missed counting
-        if cam is not None and T_world_rig is not None:
-            # get_pseudo_bb2 expects: obb (N, 165), cam (T, C), T_world_rig (T, 12)
-            obb_batched = track.obb.reshape(1, -1)  # (1, 165)
-            cam_batched = cam.unsqueeze(0)  # (1, C) — T=1
-            pose_batched = T_world_rig.unsqueeze(0)  # (1, 12) — T=1
-            _, bb2_valid = obb_batched.get_pseudo_bb2(
-                cam_batched,
-                pose_batched,
-                num_samples_per_edge=10,
-                valid_ratio=0.16667,
-            )
-            if bb2_valid.any().item():
-                track.last_visible = True
-                track.missed_count += 1
-            else:
-                track.last_visible = False
-                # If not visible, don't increment missed_count
-        else:
-            # Fallback: no camera info, always count as missed
-            track.last_visible = True
-            track.missed_count += 1
-
     def _age_tracks(
         self,
         frame_idx: int,
@@ -955,109 +916,3 @@ class BoundingBox3DTracker:
         self._next_id = 0
 
 
-def track_obbs_from_csv(
-    input_path: str,
-    output_path: Optional[str] = None,
-    iou_threshold: float = 0.25,
-    min_hits: int = 8,
-    conf_threshold: float = 0.55,
-    samp_per_dim: int = 8,
-    max_missed: int = 90,
-) -> list[TrackedInstance]:
-    """
-    Load OBBs from CSV, run online tracking frame-by-frame, save results.
-
-    Args:
-        input_path: Path to input obb.csv file
-        output_path: Path to output obb_tracked.csv file (default: input with _tracked suffix)
-        iou_threshold: IoU threshold for matching
-        min_hits: Min matches to confirm a track
-        conf_threshold: Min detection confidence
-        samp_per_dim: IoU sampling density
-        max_missed: Visible-but-unmatched frames before track removal
-
-    Returns:
-        List of final active tracked instances
-    """
-    if output_path is None:
-        base, ext = os.path.splitext(input_path)
-        output_path = f"{base}_tracked{ext}"
-
-    print(f"==> Loading OBBs from {input_path}")
-    timed_obbs = read_obb_csv(input_path)
-
-    if len(timed_obbs) == 0:
-        print("==> No OBBs found in input file, nothing to track")
-        return []
-
-    # Sort frames by timestamp
-    sorted_frames = sorted(timed_obbs.keys())
-    total_frames = len(sorted_frames)
-    print(f"==> Loaded {total_frames} frames from {input_path}")
-
-    # Create tracker
-    tracker = BoundingBox3DTracker(
-        iou_threshold=iou_threshold,
-        min_hits=min_hits,
-        conf_threshold=conf_threshold,
-        samp_per_dim=samp_per_dim,
-        max_missed=max_missed,
-        verbose=False,
-    )
-
-    # Process frame by frame
-    print(f"\n{'=' * 60}")
-    print(f"TRACKING {total_frames} FRAMES")
-    print(f"{'=' * 60}")
-
-    start_time = time.time()
-    for frame_idx, ts in enumerate(sorted_frames):
-        detections = timed_obbs[ts]
-        active_tracks = tracker.update(detections, frame_idx)
-
-        if (frame_idx + 1) % 50 == 0 or frame_idx == total_frames - 1:
-            total_tracks = len(tracker.get_all_tracks())
-            print(
-                f"  Frame {frame_idx + 1}/{total_frames}: "
-                f"{len(detections)} detections, "
-                f"{len(active_tracks)} active / {total_tracks} total tracks"
-            )
-
-    elapsed = time.time() - start_time
-    print(f"\n==> Tracking complete in {elapsed:.2f}s")
-
-    # Get active tracks (confirmed and not removed)
-    active_tracks = tracker._get_active_tracks()
-    print(f"==> {len(active_tracks)} active tracks")
-
-    if len(active_tracks) == 0:
-        print("==> No tracks, skipping output")
-        return []
-
-    # Write tracked OBBs
-    tracked_obbs = torch.stack([t.obb for t in active_tracks])
-
-    # Assign track IDs as instance IDs
-    ids = torch.tensor([t.track_id for t in active_tracks], dtype=torch.int32)
-    tracked_obbs.set_inst_id(ids)
-
-    # Round prob
-    rounded_prob = torch.round(tracked_obbs.prob * 100) / 100
-    tracked_obbs.set_prob(rounded_prob.squeeze(-1), use_mask=False)
-
-    # Build sem_id_to_name mapping
-    sem_id_to_name = {}
-    for obb in tracked_obbs:
-        sem_id = int(obb.sem_id.item())
-        if sem_id not in sem_id_to_name:
-            text = unpad_string(tensor2string(obb.text.int()))
-        else:
-            text = sem_id_to_name[sem_id]
-        sem_id_to_name[sem_id] = text
-
-    writer = ObbCsvWriter2(output_path)
-    writer.write(tracked_obbs, timestamps_ns=0, sem_id_to_name=sem_id_to_name)
-    writer.close()
-    print(f"==> Saved {len(active_tracks)} tracked OBBs to {output_path}")
-
-    return active_tracks

@@ -163,20 +163,18 @@ class OmniLoader(BaseLoader):
         with open(json_path, "r") as f:
             data = json.load(f)
 
-        self.info = data.get("info", {})
         self.categories = data.get("categories", [])
         self.images = data.get("images", [])
-        self.annotations = data.get("annotations", [])
+        annotations = data.get("annotations", [])
 
         # Build lookup dictionaries
         self.cat_id_to_name = {cat["id"]: cat["name"] for cat in self.categories}
-        self.cat_name_to_id = {cat["name"]: cat["id"] for cat in self.categories}
         self.sem_id_to_name = self.cat_id_to_name
-        self.sem_name_to_id = self.cat_name_to_id
+        self.sem_name_to_id = {cat["name"]: cat["id"] for cat in self.categories}
 
         # Build annotation lookup by image_id
         self.img_id_to_anns = {}
-        for ann in self.annotations:
+        for ann in annotations:
             img_id = ann["image_id"]
             if img_id not in self.img_id_to_anns:
                 self.img_id_to_anns[img_id] = []
@@ -209,9 +207,10 @@ class OmniLoader(BaseLoader):
             if remove_structure else []
         )
 
+        num_annotations = sum(len(v) for v in self.img_id_to_anns.values())
         print(
             f"Loaded {self.length} images from {dataset_name} {split} "
-            f"({len(self.annotations)} total annotations)"
+            f"({num_annotations} total annotations)"
         )
 
         self._init_prefetch()
@@ -259,20 +258,16 @@ class OmniLoader(BaseLoader):
         datum["img0"] = img_torch.float()
         datum["cam0"] = cam_pin.float()
 
-        # Load depth image
+        # Load depth for semi-dense points (SUNRGBD only)
         depth_np_pinhole = None
 
         if self.dataset_name == "SUNRGBD":
-            # Construct depth path from image path
-            # Image: SUNRGBD/kv2/.../image/xxx.jpg
-            # Depth: SUNRGBD/kv2/.../depth/xxx.png (raw depth, needs >>3 for meters)
             depth_path = img_info["file_path"].replace("/image/", "/depth/")
             depth_path = depth_path.replace(".jpg", ".png")
             depth_full_path = os.path.join(self.data_root, depth_path)
 
-            # Some SUNRGBD subsets (b3dodata, sun3ddata) have depth files with
-            # different names than the image. Fall back to the single .png in
-            # the depth directory when the exact name doesn't match.
+            # Some SUNRGBD subsets have depth files with different names than
+            # the image. Fall back to the single .png in the depth directory.
             if not os.path.exists(depth_full_path):
                 depth_dir = os.path.dirname(depth_full_path)
                 if os.path.isdir(depth_dir):
@@ -281,13 +276,9 @@ class OmniLoader(BaseLoader):
                         depth_full_path = os.path.join(depth_dir, pngs[0])
 
             if os.path.exists(depth_full_path):
-                # Load depth as uint16 and convert to meters
                 depth_img = Image.open(depth_full_path)
-                depth_np = np.array(depth_img, dtype=np.float32)
-                # SUNRGBD depth encoding: (raw >> 3) / 1000 = raw / 8000 to get meters
-                depth_np = depth_np / 8000.0
+                depth_np = np.array(depth_img, dtype=np.float32) / 8000.0
 
-                # Resize depth if needed (matching image resize)
                 if self.resize is not None:
                     depth_pil = Image.fromarray(depth_np)
                     depth_pil = depth_pil.resize(
@@ -295,15 +286,7 @@ class OmniLoader(BaseLoader):
                     )
                     depth_np = np.array(depth_pil)
 
-                depth_np_pinhole = depth_np.copy()
-                datum["depth0"] = torch.from_numpy(depth_np).float()[None, None]
-            else:
-                datum["depth0"] = torch.zeros(
-                    1, 1, resizeH, resizeW, dtype=torch.float32
-                )
-        else:
-            # For non-SUNRGBD datasets, provide zero depth
-            datum["depth0"] = torch.zeros(1, 1, resizeH, resizeW, dtype=torch.float32)
+                depth_np_pinhole = depth_np
 
         # Compose transformations for world pose:
         # 1. Load SUNRGBD extrinsics if available (camera-to-SUNRGBD-world rotation)
