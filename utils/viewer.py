@@ -36,7 +36,7 @@ from utils.file_io import (
     read_obb_csv,
 )
 from utils.tw.obb import BB3D_LINE_ORDERS, ObbTW
-from utils.orbit_viewer import OrbitViewer
+from utils.orbit_viewer import OrbitViewer, scale_factor
 from utils.tw.pose import PoseTW
 from utils.taxonomy import BOXY_SEM2NAME, SSI_COLORS_ALT, TEXT2COLORS
 from utils.tw.tensor_utils import find_nearest2, tensor2string, unpad_string
@@ -719,7 +719,7 @@ class OBBViewer(OrbitViewer):
     """Viewer for rendering 3D oriented bounding boxes."""
 
     title = "OBB Fusion Viewer"
-    window_size = (2250, 1100)
+    window_size = (2250 * scale_factor, 1100 * scale_factor)
 
     def _empty_obbs_like(self, obbs: Optional[ObbTW] = None) -> ObbTW:
         if obbs is not None and hasattr(obbs, "_data"):
@@ -1985,7 +1985,7 @@ class OBBViewer(OrbitViewer):
         w, h = self.wnd.size
 
         imgui.set_next_window_position(0, 0, imgui.ONCE)
-        imgui.set_next_window_size(450, h, imgui.ALWAYS)  # Always match window height
+        imgui.set_next_window_size(self.ui_panel_width, h, imgui.ALWAYS)  # Always match window height
 
         imgui.begin("OBB Controls", flags=imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_RESIZE)
 
@@ -3358,7 +3358,7 @@ class TrackerViewer(SequenceOBBViewer):
     """
 
     title = "OBB Tracker Viewer"
-    window_size = (2250, 1100)
+    window_size = (2250 * scale_factor, 1100 * scale_factor)
 
     def __init__(
         self,
@@ -5349,7 +5349,7 @@ class TrackerViewer(SequenceOBBViewer):
 
         w, h = self.wnd.size
         imgui.set_next_window_position(0, 0, imgui.ALWAYS)
-        imgui.set_next_window_size(450, h, imgui.ALWAYS)
+        imgui.set_next_window_size(self.ui_panel_width, h, imgui.ALWAYS)
 
         imgui.begin(
             "Tracker Controls", flags=imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_RESIZE

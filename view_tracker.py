@@ -6,6 +6,7 @@
 import argparse
 import os
 
+from utils.orbit_viewer import scale_factor
 from utils.viewer import (
     add_common_args,
     build_seq_ctx,
@@ -57,7 +58,7 @@ def main():
     seq_ctx = build_seq_ctx(input_path, dataset_type)
     bb2d_csv_path = resolve_bb2d_csv(log_dir, args.bb2d_csv, args.write_name)
 
-    default_w, default_h = 2250, 1100
+    default_w, default_h = 2250 * scale_factor, 1100 * scale_factor
     init_w = args.window_w if args.window_w > 0 else default_w
     init_h = args.window_h if args.window_h > 0 else default_h
 

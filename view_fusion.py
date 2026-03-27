@@ -8,6 +8,7 @@ import os
 
 import torch
 from utils.viewer import launch_viewer, resolve_input, subsample_timed_obbs, OBBViewer
+from utils.orbit_viewer import scale_factor
 from utils.file_io import read_obb_csv
 from utils.demo_utils import EVAL_PATH
 from utils.demo_utils import DEFAULT_SEQ
@@ -65,7 +66,7 @@ def main():
             load_view_data = torch.load(target, weights_only=False)
             print(f"==> Loaded camera view from {target}")
 
-    default_w, default_h = 1400, 900
+    default_w, default_h = 1400 * scale_factor, 900 * scale_factor
     init_w = args.window_w if args.window_w > 0 else default_w
     init_h = args.window_h if args.window_h > 0 else default_h
 

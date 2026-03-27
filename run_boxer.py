@@ -263,12 +263,12 @@ def main():
         method = "GT2D"
     else:
         from owl.owl_wrapper import OwlWrapper
-        det2d = OwlWrapper(
+        owl = OwlWrapper(
             device, text_prompts=text_labels, min_confidence=args.thresh2d,
             precision=args.precision,
         )
         method = "OWLv2"
-    _dbg("det2d")
+    _dbg("owl")
 
     boxernet = BoxerNet.load_from_checkpoint(args.ckpt, device=device)
     loader.resize = boxernet.hw
@@ -385,7 +385,7 @@ def main():
             datum["sdp_w"] = torch.zeros(0, 3)
 
         # 2D Detection
-        timer.start("det2d")
+        timer.start("owl")
         if args.cache2d:
             # Look up cached 2D BBs by timestamp
             time_ns = int(datum["time_ns0"])
@@ -413,9 +413,9 @@ def main():
             # Check if there are any valid GT objects for this frame
             obbs_valid = datum["obbs"].remove_padding()
             if len(obbs_valid) == 0:
-                t_det2d = timer.stop("det2d")
+                t_owl = timer.stop("owl")
                 pbar.set_postfix_str(
-                    f"0 GT obbs | load:{t_load:.0f}ms det2d:{t_det2d:.0f}ms"
+                    f"0 GT obbs | load:{t_load:.0f}ms owl:{t_owl:.0f}ms"
                 )
                 if args.viz_headless:
                     write_empty_frame(img_np, HH, WW, ii)
@@ -435,9 +435,9 @@ def main():
             bb2d = bb2d[valid_mask]
             labels2d = [labels2d[i] for i in range(len(valid_mask)) if valid_mask[i]]
             if len(bb2d) == 0:
-                t_det2d = timer.stop("det2d")
+                t_owl = timer.stop("owl")
                 pbar.set_postfix_str(
-                    f"0 valid bb2d | load:{t_load:.0f}ms det2d:{t_det2d:.0f}ms"
+                    f"0 valid bb2d | load:{t_load:.0f}ms owl:{t_owl:.0f}ms"
                 )
                 if args.viz_headless:
                     write_empty_frame(img_np, HH, WW, ii)
@@ -446,17 +446,17 @@ def main():
             scores2d = 0.5 * torch.ones(bb2d.shape[0])
         else:
             img_torch_255 = img_torch.clone() * 255.0
-            bb2d, scores2d, label_ints, _ = det2d.forward(
+            bb2d, scores2d, label_ints, _ = owl.forward(
                 img_torch_255,
                 rotated.item(),
                 resize_to_HW=(args.detector_hw, args.detector_hw),
             )
             labels2d = [text_labels[label_int] for label_int in label_ints]
 
-        t_det2d = timer.stop("det2d")
+        t_owl = timer.stop("owl")
 
         if bb2d.shape[0] == 0:
-            pbar.set_postfix_str(f"0 dets | load:{t_load:.0f}ms det2d:{t_det2d:.0f}ms")
+            pbar.set_postfix_str(f"0 dets | load:{t_load:.0f}ms owl:{t_owl:.0f}ms")
             if args.viz_headless:
                 write_empty_frame(img_np, HH, WW, ii)
             continue
@@ -648,7 +648,7 @@ def main():
                         for t in active_tracks
                     ]
                     track_texts = [
-                        f"{t.cached_text[:10]} (health={t.accumulated_weight / max(t.support_count, 1):.2f})"
+                        f"{t.cached_text[:10]} (conf_track={t.accumulated_weight / max(t.support_count, 1):.2f})"
                         for t in active_tracks
                     ]
                     viz_track = draw_bb3s(
@@ -686,7 +686,7 @@ def main():
 
             t_viz = timer.stop("viz")
 
-        timing_str = f"load:{t_load:.0f}ms det2d:{t_det2d:.0f}ms boxer:{t_boxer:.0f}ms"
+        timing_str = f"load:{t_load:.0f}ms owl:{t_owl:.0f}ms boxer:{t_boxer:.0f}ms"
         if tracker is not None:
             timing_str += f" track:{t_track:.0f}ms"
         timing_str += f" csv:{t_csv:.0f}ms"

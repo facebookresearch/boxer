@@ -30,6 +30,7 @@ from utils.tw.pose import PoseTW
 from utils.tw.tensor_utils import find_nearest2
 from utils.demo_utils import CKPT_PATH
 from utils.image import render_depth_patches
+from utils.orbit_viewer import scale_factor
 from utils.viewer import (
     add_common_args,
     build_seq_ctx,
@@ -103,7 +104,7 @@ def main():
     else:
         empty_timed_obbs = {int(ts): empty_obb for ts in seq_ctx["rgb_timestamps"]}
 
-    default_w, default_h = 2250, 1100
+    default_w, default_h = 2250 * scale_factor, 1100 * scale_factor
     init_w = args.window_w if args.window_w > 0 else default_w
     init_h = args.window_h if args.window_h > 0 else default_h
 
