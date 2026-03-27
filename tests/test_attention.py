@@ -48,43 +48,6 @@ class TestAttention(unittest.TestCase):
         self.assertEqual(x.grad.shape, x.shape)
 
 
-class TestAttentionMask(unittest.TestCase):
-    def test_attention_mask_blocks_values(self):
-        torch.manual_seed(0)
-        attn = Attention(dim=32, heads=4, dim_head=8)
-
-        B, Nq, Nk = 1, 4, 3
-        x = torch.randn(B, Nq, 32)
-        y = torch.randn(B, Nk, 32)
-
-        # No mask: all tokens visible
-        out_unmasked = attn(x, y, attn_mask=None)
-
-        # Mask the last key entirely (simulate padding or invalid token)
-        mask = torch.zeros(B, 1, Nq, Nk, dtype=torch.bool)
-        mask[..., -1] = True  # mask last key
-        out_masked = attn(x, y, attn_mask=mask)
-
-        # The masked outputs should differ from unmasked
-        diff = (out_unmasked - out_masked).abs().mean().item()
-        self.assertGreater(diff, 1e-6)
-
-        # Changing the masked value should change the output
-        x[..., -1] = 0.0  # zero out last key
-        out_masked2 = attn(x, y, attn_mask=mask)
-        self.assertTrue(torch.allclose(out_masked, out_masked2, atol=1e-6))
-
-    def test_attention_mask_shape_mismatch_raises(self):
-        attn = Attention(dim=16, heads=2, dim_head=8)
-        x = torch.randn(1, 3, 16)
-        y = torch.randn(1, 3, 16)
-
-        # Wrong shape for mask: should raise an error
-        bad_mask = torch.zeros(1, 2, 2, dtype=torch.bool)
-        with self.assertRaises(RuntimeError):
-            _ = attn(x, y, attn_mask=bad_mask)
-
-
 class TestAttentionBlockV2(unittest.TestCase):
     def test_output_shape_self_attn(self):
         model = AttentionBlockV2(dim=128, depth=2, heads=4)

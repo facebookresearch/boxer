@@ -30,11 +30,6 @@ from utils.demo_utils import CKPT_PATH
 from torch import nn, Tensor
 
 
-def _configure_dynamo():
-    """Configure torch._dynamo settings lazily to avoid importing transformers/onnx at startup."""
-    if hasattr(torch, "_dynamo"):
-        torch._dynamo.config.automatic_dynamic_shapes = False
-        torch._dynamo.config.accumulated_cache_size_limit = 1024
 logger = logging.getLogger("dinov3")
 
 
@@ -521,60 +516,6 @@ class SelfAttention(nn.Module):
         return x.reshape([B, N, C])
 
 
-class CausalSelfAttention(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int = 8,
-        qkv_bias: bool = False,
-        proj_bias: bool = True,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-    ) -> None:
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim**-0.5
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = attn_drop
-        self.proj = nn.Linear(dim, dim, bias=proj_bias)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def init_weights(
-        self,
-        init_attn_std: Optional[float] = None,
-        init_proj_std: Optional[float] = None,
-        factor: float = 1.0,
-    ) -> None:
-        init_attn_std = init_attn_std or (self.dim**-0.5)
-        init_proj_std = init_proj_std or init_attn_std * factor
-        nn.init.normal_(self.qkv.weight, std=init_attn_std)
-        nn.init.normal_(self.proj.weight, std=init_proj_std)
-        if self.qkv.bias is not None:
-            nn.init.zeros_(self.qkv.bias)
-        if self.proj.bias is not None:
-            nn.init.zeros_(self.proj.bias)
-
-    def forward(self, x: Tensor, is_causal: bool = True) -> Tensor:
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
-        q, k, v = torch.unbind(qkv, 2)
-        q, k, v = [t.transpose(1, 2) for t in [q, k, v]]
-        x = torch.nn.functional.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            dropout_p=self.attn_drop if self.training else 0,
-            is_causal=is_causal,
-        )
-        x = x.transpose(1, 2).contiguous().view(B, N, C)
-        x = self.proj_drop(self.proj(x))
-        return x
-
-
 class SelfAttentionBlock(nn.Module):
     def __init__(
         self,
@@ -786,72 +727,6 @@ class SelfAttentionBlock(nn.Module):
             return self._forward_list(x_or_x_list, rope_list=rope_or_rope_list)
         else:
             raise AssertionError
-
-
-class CausalSelfAttentionBlock(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        ffn_ratio: float = 4.0,
-        ls_init_value: Optional[float] = None,
-        is_causal: bool = True,
-        act_layer: Callable = nn.GELU,
-        norm_layer: Callable = nn.LayerNorm,
-        dropout_prob: float = 0.0,
-    ):
-        super().__init__()
-
-        self.dim = dim
-        self.is_causal = is_causal
-        self.ls1 = (
-            LayerScale(dim, init_values=ls_init_value)
-            if ls_init_value
-            else nn.Identity()
-        )
-        self.attention_norm = norm_layer(dim)
-        self.attention = CausalSelfAttention(
-            dim, num_heads, attn_drop=dropout_prob, proj_drop=dropout_prob
-        )
-
-        self.ffn_norm = norm_layer(dim)
-        ffn_hidden_dim = int(dim * ffn_ratio)
-        self.feed_forward = Mlp(
-            in_features=dim,
-            hidden_features=ffn_hidden_dim,
-            drop=dropout_prob,
-            act_layer=act_layer,
-        )
-
-        self.ls2 = (
-            LayerScale(dim, init_values=ls_init_value)
-            if ls_init_value
-            else nn.Identity()
-        )
-
-    def init_weights(
-        self,
-        init_attn_std: Optional[float] = None,
-        init_proj_std: Optional[float] = None,
-        init_fc_std: Optional[float] = None,
-        factor: float = 1.0,
-    ) -> None:
-        init_attn_std = init_attn_std or (self.dim**-0.5)
-        init_proj_std = init_proj_std or init_attn_std * factor
-        init_fc_std = init_fc_std or (2 * self.dim) ** -0.5
-        self.attention.init_weights(init_attn_std, init_proj_std)
-        self.attention_norm.reset_parameters()
-        nn.init.normal_(self.feed_forward.fc1.weight, std=init_fc_std)
-        nn.init.normal_(self.feed_forward.fc2.weight, std=init_proj_std)
-        self.ffn_norm.reset_parameters()
-
-    def forward(
-        self,
-        x: torch.Tensor,
-    ):
-        x_attn = x + self.ls1(self.attention(self.attention_norm(x), self.is_causal))
-        x_ffn = x_attn + self.ls2(self.feed_forward(self.ffn_norm(x_attn)))
-        return x_ffn
 
 
 # ===================
@@ -1194,93 +1069,6 @@ class DinoVisionTransformer(nn.Module):
             return self.head(ret["x_norm_clstoken"])  # pyre-ignore
 
 
-def vit_small(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
-        patch_size=patch_size,
-        embed_dim=384,
-        depth=12,
-        num_heads=6,
-        ffn_ratio=4,
-        **kwargs,
-    )
-    return model
-
-
-def vit_base(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
-        patch_size=patch_size,
-        embed_dim=768,
-        depth=12,
-        num_heads=12,
-        ffn_ratio=4,
-        **kwargs,
-    )
-    return model
-
-
-def vit_large(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
-        patch_size=patch_size,
-        embed_dim=1024,
-        depth=24,
-        num_heads=16,
-        ffn_ratio=4,
-        **kwargs,
-    )
-    return model
-
-
-def vit_so400m(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
-        patch_size=patch_size,
-        embed_dim=1152,
-        depth=27,
-        num_heads=18,
-        ffn_ratio=3.777777778,
-        **kwargs,
-    )
-    return model
-
-
-def vit_huge2(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
-        patch_size=patch_size,
-        embed_dim=1280,
-        depth=32,
-        num_heads=20,
-        ffn_ratio=4,
-        **kwargs,
-    )
-    return model
-
-
-def vit_giant2(patch_size=16, **kwargs):
-    """
-    Close to ViT-giant, with embed-dim 1536 and 24 heads => embed-dim per head 64
-    """
-    model = DinoVisionTransformer(
-        patch_size=patch_size,
-        embed_dim=1536,
-        depth=40,
-        num_heads=24,
-        ffn_ratio=4,
-        **kwargs,
-    )
-    return model
-
-
-def vit_7b(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
-        patch_size=patch_size,
-        embed_dim=4096,
-        depth=40,
-        num_heads=32,
-        ffn_ratio=3,
-        **kwargs,
-    )
-    return model
-
-
 # ===============================================
 
 DINOV3_BASE_URL = "https://dl.fbaipublicfiles.com/dinov3"
@@ -1601,45 +1389,6 @@ def dinov3_vitl16(
         pretrained=pretrained,
         weights=weights,
         compact_arch_name="vitl",
-        check_hash=check_hash,
-        **kwargs,
-    )
-
-
-def dinov3_vitl16plus(
-    *,
-    pretrained: bool = True,
-    weights: Union[Weights, str] = Weights.LVD1689M,
-    check_hash: bool = False,
-    **kwargs,
-):
-    if "hash" not in kwargs:
-        kwargs["hash"] = "46503df0"
-
-    return _make_dinov3_vit(
-        img_size=224,
-        patch_size=16,
-        in_chans=3,
-        pos_embed_rope_base=100,
-        pos_embed_rope_normalize_coords="separate",
-        pos_embed_rope_rescale_coords=2,
-        pos_embed_rope_dtype="fp32",
-        embed_dim=1024,
-        depth=24,
-        num_heads=16,
-        ffn_ratio=6.0,
-        qkv_bias=True,
-        drop_path_rate=0.0,
-        layerscale_init=1.0e-05,
-        norm_layer="layernormbf16",
-        ffn_layer="swiglu",
-        ffn_bias=True,
-        proj_bias=True,
-        n_storage_tokens=4,
-        mask_k_bias=True,
-        pretrained=pretrained,
-        weights=weights,
-        compact_arch_name="vitlplus",
         check_hash=check_hash,
         **kwargs,
     )

@@ -545,9 +545,9 @@ def main():
             timer.start("viz")
             _t0 = time.perf_counter()
 
-            bb2_texts = [f"{l} {s:.2f}" for s, l in zip(scores2d, labels2d)]
-            bb2_colors = jet_colors_bgr([1.0 - s for s in scores2d])
-            bb3_texts = [f"{l} {s:.2f}" for s, l in zip(scores3d, labels3d)]
+            bb2_texts = [f"{l[:10]} (conf2d={s:.2f})" for s, l in zip(scores2d, labels2d)]
+            bb2_colors = jet_colors_bgr(scores2d)
+            bb3_texts = [f"{l[:10]} (conf3d={s:.2f})" for s, l in zip(scores3d, labels3d)]
             bb3_colors = jet_colors_bgr(scores3d)
 
             if DEBUG_VIZ:
@@ -563,8 +563,9 @@ def main():
                 texts=bb2_texts,
                 clr=bb2_colors,
             )
-            put_text(viz_2d, f"{method} [{args.detector_hw}x{args.detector_hw}]", scale=0.6, line=0)
-            put_text(viz_2d, f"frame {ii}, t={int(datum['time_ns0'])}", scale=0.5, line=1)
+            put_text(viz_2d, f"2D Detections ({method} {args.detector_hw}x{args.detector_hw})", scale=0.6, line=0)
+            t_sec = int(datum['time_ns0']) / 1e9
+            put_text(viz_2d, f"frame {ii}, t={t_sec:.3f}s", scale=0.5, line=2)
             max_labels = 64
             if len(text_labels) > max_labels:
                 line = -1
@@ -624,7 +625,7 @@ def main():
                 colors=bb3_colors,
                 texts=bb3_texts,
             )
-            put_text(viz_3d, f"BoxerNet [{boxernet.hw}x{boxernet.hw}], {obb_pr_w.shape[0]} 3DBBs", scale=0.6, line=0)
+            put_text(viz_3d, f"3D Detections (Boxer {boxernet.hw}x{boxernet.hw})", scale=0.6, line=0)
             put_text(viz_3d, f"Device: '{loader.device_name}', Camera: '{loader.camera}'", scale=0.5,
                 line=-1,
             )
@@ -637,16 +638,15 @@ def main():
 
             if tracker is not None and active_tracks is not None:
                 viz_track = img_np.copy()
-                confirmed = [t for t in active_tracks if t.state.name == "ACTIVE"]
-                if len(confirmed) > 0:
-                    tracked_obbs = torch.stack([t.obb for t in confirmed])
+                if len(active_tracks) > 0:
+                    tracked_obbs = torch.stack([t.obb for t in active_tracks])
                     track_colors = [
                         (np.array(TAB20[t.track_id % len(TAB20)]) * 255).tolist()
-                        for t in confirmed
+                        for t in active_tracks
                     ]
                     track_texts = [
-                        f"{t.cached_text} (n={t.support_count})"
-                        for t in confirmed
+                        f"{t.cached_text[:10]} (health={t.accumulated_weight / max(t.support_count, 1):.2f})"
+                        for t in active_tracks
                     ]
                     viz_track = draw_bb3s(
                         viz=viz_track,
@@ -658,7 +658,7 @@ def main():
                         colors=track_colors,
                         texts=track_texts,
                     )
-                put_text(viz_track, f"Tracked: {len(confirmed)} objects", scale=0.6, line=0)
+                put_text(viz_track, f"3D Tracks: {len(active_tracks)} Objects", scale=0.6, line=0)
                 panels.append(viz_track)
 
             final = np.hstack(panels)

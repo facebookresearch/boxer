@@ -359,9 +359,6 @@ class OmniLoader(BaseLoader):
         # No rotation
         datum["rotated0"] = torch.tensor(False).reshape(1)
 
-        # Number of images (always 1 for Omni3D)
-        datum["num_img"] = torch.tensor(1).reshape(1)
-
         # Get GT 2D bounding boxes for this image
         img_id = img_info["id"]
         anns = self.img_id_to_anns.get(img_id, [])

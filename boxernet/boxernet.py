@@ -16,11 +16,10 @@ from boxernet.dinov3_wrapper import (
     DinoV3Wrapper,
 )
 from utils.gravity import gravity_align_T_world_cam
-from utils.image import put_text, torch2cv2
 
 
 # ---------------------------------------------------------------------------
-# Attention modules (merged from attention_utils.py)
+# Attention modules
 # ---------------------------------------------------------------------------
 
 
@@ -51,7 +50,7 @@ class Attention(nn.Module):
         self.to_v = nn.Linear(dim, inner_dim, bias=False)
         self.to_out = nn.Linear(inner_dim, dim, bias=False)
 
-    def forward(self, x, y, attn_mask=None):
+    def forward(self, x, y):
         # Pre-norm (apply norm before attention) as in https://arxiv.org/abs/2002.04745.
         x = self.norm(x)
         y = self.norm(y)
@@ -66,7 +65,7 @@ class Attention(nn.Module):
         k = k.view(B, N_kv, self.heads, -1).transpose(1, 2)
         v = v.view(B, N_kv, self.heads, -1).transpose(1, 2)
         # Compute softmax(Q*K^T / sqrt(D))*V
-        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask)
+        out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
         # Combine the multi-headed output.
         out = out.transpose(1, 2).contiguous().view(B, N_q, -1)
         return self.to_out(out)
@@ -99,7 +98,7 @@ class AttentionBlockV2(nn.Module):
                 )
             )
 
-    def forward(self, x, y=None, attn_mask=None):
+    def forward(self, x, y=None):
         """If y not provided this is self-attention; otherwise is cross-attention.
 
         For cross-attention, the queries should be independent, so changing the value of
@@ -114,16 +113,15 @@ class AttentionBlockV2(nn.Module):
         """
         if y is None:
             y = x  # Self-attention.
-        # else: # Cross-attention.
 
         for attn, ff in self.layers:
-            x = attn(x, y, attn_mask=attn_mask) + x
+            x = attn(x, y) + x
             x = ff(x) + x
         return x
 
 
 # ---------------------------------------------------------------------------
-# AleHead (merged from alehead.py)
+# Prediction Head -- Predicts 7 DoF params + Aleotoric Uncertainty per box
 # ---------------------------------------------------------------------------
 
 
@@ -193,7 +191,6 @@ class AleHead(torch.nn.Module):
         T_vo = PoseTW.from_Rt(R, center_v)
 
         # Build final ObbTW.
-        # prob = torch.ones((B, M, 1)).to(device)
         sigma2 = torch.exp(logvar)
         prob = 1.0 / (1.0 + sigma2)
 
@@ -206,7 +203,6 @@ class AleHead(torch.nn.Module):
             inst_id=inst_id,
             sem_id=sem_id,
         )
-        # obb_pr_v._data[~valid] = -1  # TODO(dd): adding this removes too many boxes?
         T_wv = batch["T_world_voxel0"].unsqueeze(1)
         obb_pr_w = obb_pr_v.transform(T_wv)
         output["obbs_pr_w"] = obb_pr_w
@@ -398,45 +394,33 @@ def generate_plucker_encoding(B, fH, fW, patch_size, cam, T_vc):
     """
     device = cam.device
 
-    try:
-        # (B, fH*fW, 2)
-        uv = generate_patch_centers(B, fH, fW, patch_size, device)
+    # (B, fH*fW, 2)
+    uv = generate_patch_centers(B, fH, fW, patch_size, device)
 
-        # Unproject rays to get direction vectors in camera frame
-        dirs_cam, valid = cam.unproject(uv)  # (B, fH*fW, 3)
+    # Unproject rays to get direction vectors in camera frame
+    dirs_cam, valid = cam.unproject(uv)  # (B, fH*fW, 3)
 
-        # Ray origin in camera frame (typically [0, 0, 0])
-        origins_cam = torch.zeros_like(dirs_cam)
+    # Ray origin in camera frame (typically [0, 0, 0])
+    origins_cam = torch.zeros_like(dirs_cam)
 
-        # Transform to voxel frame
-        dirs_voxel = T_vc.rotate(dirs_cam)  # (B, fH*fW, 3)
+    # Transform to voxel frame
+    dirs_voxel = T_vc.rotate(dirs_cam)  # (B, fH*fW, 3)
 
-        # Normalize.
-        dirs_voxel = dirs_voxel / (dirs_voxel.norm(dim=-1, keepdim=True) + 1e-8)
+    # Normalize.
+    dirs_voxel = dirs_voxel / (dirs_voxel.norm(dim=-1, keepdim=True) + 1e-8)
 
-        origins_voxel = T_vc * origins_cam  # (B, fH*fW, 3)
+    origins_voxel = T_vc * origins_cam  # (B, fH*fW, 3)
 
-        # Compute moment: m = o × d
-        m_voxel = torch.cross(origins_voxel, dirs_voxel, dim=-1)  # (B, fH*fW, 3)
+    # Compute moment: m = o × d
+    m_voxel = torch.cross(origins_voxel, dirs_voxel, dim=-1)  # (B, fH*fW, 3)
 
-        # Stack to get Plücker 6D line encoding: (d, m)
-        plucker_voxel = torch.cat([dirs_voxel, m_voxel], dim=-1)  # (B, fH*fW, 6)
+    # Stack to get Plücker 6D line encoding: (d, m)
+    plucker_voxel = torch.cat([dirs_voxel, m_voxel], dim=-1)  # (B, fH*fW, 6)
 
-        # set invalid rays to zero
-        plucker_voxel[~valid] = 0.0
-        # set any nans to zero
-        plucker_voxel[torch.isnan(plucker_voxel)] = 0.0
-
-    except Exception as e:
-        print("FINDME - Exception in generate_plucker_encoding")
-        print("B", B)
-        print("fH", fH)
-        print("fW", fW)
-        print("patch_size", patch_size)
-        print("cam", cam)
-        print("T_vc", T_vc)
-        print("device", device)
-        raise e
+    # set invalid rays to zero
+    plucker_voxel[~valid] = 0.0
+    # set any nans to zero
+    plucker_voxel[torch.isnan(plucker_voxel)] = 0.0
 
     return plucker_voxel
 
@@ -535,7 +519,6 @@ class BoxerNet(nn.Module):
         "cross_depth": 6,
     }
     base_default_cfg = {"trainable": True, "combine_images": True}
-    required_batch_keys = ["img0", "T_world_rig0"]
 
     def __init__(self, cfg):
         super().__init__()
@@ -550,7 +533,6 @@ class BoxerNet(nn.Module):
         self.in_depth = cfg["in_depth"]
         self.cross_depth = cfg["cross_depth"]
         self.with_ray = cfg.get("with_ray", False)
-        self.iou_threshes = [0.2, 0.5]
         assert self.cross_depth >= 1, "cross_depth must be at least 1"
 
         dinov3_model_name = "dinov3_vits16plus"
@@ -607,11 +589,11 @@ class BoxerNet(nn.Module):
         model.device = device
         return model
 
-    def process_camera(self, datum, index=0):
-        img = datum[f"img{index}"]
-        cam = datum[f"cam{index}"]
-        T_wr = datum[f"T_world_rig{index}"]
-        rotated = datum[f"rotated{index}"]
+    def process_camera(self, datum):
+        img = datum["img0"]
+        cam = datum["cam0"]
+        T_wr = datum["T_world_rig0"]
+        rotated = datum["rotated0"]
         assert img.max() <= 1.0, "input image should be in [0,1]"
         if img.ndim == 3:
             img = img.unsqueeze(0)
@@ -626,17 +608,15 @@ class BoxerNet(nn.Module):
         assert isinstance(rotated, torch.Tensor)
         assert rotated.ndim == 1
         out = {}
-        out[f"img{index}"] = img
-        out[f"cam{index}"] = CameraTW(cam_data)
-        out[f"T_world_rig{index}"] = PoseTW(T_wr_data)
-        out[f"rotated{index}"] = rotated
+        out["img0"] = img
+        out["cam0"] = CameraTW(cam_data)
+        out["T_world_rig0"] = PoseTW(T_wr_data)
+        out["rotated0"] = rotated
         return out
 
     def prepare_inputs(self, datum):
         inputs = {}
-        num_img = datum["num_img"]
-        for ni in range(num_img):
-            inputs.update(self.process_camera(datum, index=ni))
+        inputs.update(self.process_camera(datum))
 
         sdp_w = datum["sdp_w"]
         assert sdp_w.shape[1] == 3, "sdp_w should be Nx3"
@@ -655,72 +635,62 @@ class BoxerNet(nn.Module):
                 inputs[key] = inputs[key].to(self.device).bool()
             else:
                 inputs[key] = inputs[key].to(self.device).float()
-        inputs["num_img"] = torch.tensor(
-            [num_img], dtype=torch.int32, device=self.device
-        )
 
         return inputs
 
-    def encode(self, batch, out):
+    def encode(self, batch):
         out = {}
 
-        num_img = batch["num_img"][0]
-        input_enc = []
+        torch_img = batch["img0"]
+        cam = batch["cam0"]
+        T_wr = batch["T_world_rig0"]
+        T_wc = T_wr @ cam.T_camera_rig.inverse()
+        if "T_world_voxel0" not in batch:
+            T_wv = gravity_align_T_world_cam(T_wc, z_grav=True)
+            rpy = T_wv.to_euler()  # T_wv should only have yaw value
+            assert torch.allclose(
+                torch.zeros(1, device=rpy.device), rpy[:, :2], atol=1e-4
+            )
+            batch["T_world_voxel0"] = T_wv
+        T_wv = batch["T_world_voxel0"]
+        rotated = batch["rotated0"]
+        B, _, H, W = torch_img.shape
 
-        # DINOv3 path: process each image independently.
-        for ni in range(num_img):
-            torch_img = batch[f"img{ni}"]
-            cam = batch[f"cam{ni}"]
-            T_wr = batch[f"T_world_rig{ni}"]
-            T_wc = T_wr @ cam.T_camera_rig.inverse()
-            if "T_world_voxel0" not in batch:
-                T_wv = gravity_align_T_world_cam(T_wc, z_grav=True)
-                rpy = T_wv.to_euler()  # T_wv should only have yaw value
-                assert torch.allclose(
-                    torch.zeros(1, device=rpy.device), rpy[:, :2], atol=1e-4
-                )
-                batch["T_world_voxel0"] = T_wv
-            T_wv = batch["T_world_voxel0"]
-            rotated = batch[f"rotated{ni}"]
-            B, _, H, W = torch_img.shape
+        with torch.no_grad():
+            # Run DinoV3.
+            dino_feat = batch_dino(self.dino, torch_img, rotated)
+            out["dino0"] = dino_feat.clone()
+            _, _, fH, fW = dino_feat.shape
+            dino_feat = dino_feat.reshape(B, -1, fH * fW).permute(0, 2, 1)
 
-            with torch.no_grad():
-                # Run DinoV3.
-                dino_feat = batch_dino(self.dino, torch_img, rotated)
-                out[f"dino{ni}"] = dino_feat.clone()
-                _, _, fH, fW = dino_feat.shape
-                dino_feat = dino_feat.reshape(B, -1, fH * fW).permute(0, 2, 1)
+            # Render semi-dense points as patches.
+            sdp_w = batch["sdp_w_padded"]
+            sdp_median = sdp_to_patches(
+                sdp_w, cam, T_wr, H, W, self.dino.patch_size
+            )
+            out["sdp_patch0"] = sdp_median.clone()
+            sdp_input = sdp_median.reshape(B, -1, fH * fW).permute(0, 2, 1)
+            x = torch.cat([dino_feat, sdp_input], dim=-1)
 
-                # Render semi-dense points as patches.
-                sdp_w = batch["sdp_w_padded"]
-                sdp_median = sdp_to_patches(
-                    sdp_w, cam, T_wr, H, W, self.dino.patch_size
-                )
-                out[f"sdp_patch{ni}"] = sdp_median.clone()
-                sdp_input = sdp_median.reshape(B, -1, fH * fW).permute(0, 2, 1)
-                x = torch.cat([dino_feat, sdp_input], dim=-1)
-
-                # Get ray directions in voxel frame.
-                if self.with_ray:
-                    T_vc = T_wv.inverse() @ T_wc
-                    if ni == 0:
-                        # print a loud warning if T_vc.t is not close to zero (loose tolerance).
-                        # This is because we assume T_vc.t is close to zero in the code below.
-                        if not torch.allclose(
-                            T_vc.t, torch.zeros_like(T_vc.t), atol=1e-2
-                        ):
-                            print(
-                                f"WARNING: T_vc.t is not close to zero: {T_vc.t}. This is not expected."
-                            )
-                    ray_enc = generate_plucker_encoding(
-                        B, fH, fW, self.dino.patch_size, cam, T_vc
+            # Get ray directions in voxel frame.
+            if self.with_ray:
+                T_vc = T_wv.inverse() @ T_wc
+                # print a loud warning if T_vc.t is not close to zero (loose tolerance).
+                # This is because we define the gravity aligned coordinate frame to have
+                # a (0,0,0) translation relative to the camera center.
+                if not torch.allclose(
+                    T_vc.t, torch.zeros_like(T_vc.t), atol=1e-2
+                ):
+                    print(
+                        f"WARNING: T_vc.t is not close to zero: {T_vc.t}. This is not expected."
                     )
-                    out[f"ray_enc{ni}"] = ray_enc.clone()
-                    x = torch.cat([x, ray_enc], dim=-1)
+                ray_enc = generate_plucker_encoding(
+                    B, fH, fW, self.dino.patch_size, cam, T_vc
+                )
+                out["ray_enc0"] = ray_enc.clone()
+                x = torch.cat([x, ray_enc], dim=-1)
 
-            input_enc.append(self.input2emb(x))
-
-        input_enc = torch.cat(input_enc, dim=1)
+        input_enc = self.input2emb(x)
 
         if self.in_depth > 0:
             input_enc = self.self_attn(input_enc)
@@ -766,7 +736,6 @@ class BoxerNet(nn.Module):
     @torch.no_grad()
     def forward(self, datum):
         inputs = self.prepare_inputs(datum)
-        out = {}
-        out = self.encode(inputs, out)
+        out = self.encode(inputs)
         out = self.query(inputs, out)
         return out

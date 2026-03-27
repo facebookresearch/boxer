@@ -33,3 +33,6 @@ sample_data/
 
 # Visualization output
 output/
+
+# ImGui
+imgui.ini

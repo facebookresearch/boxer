@@ -778,7 +778,6 @@ class AriaLoader(BaseLoader):
             for key in out:
                 output[f"{key}{ni}"] = out[key]
 
-        output["num_img"] = len(self.stream_id)
         ts_ns = output[
             "time_ns0"
         ]  # use the first one as the timestamp for points and obb
