@@ -1,5 +1,6 @@
 import csv
 import gzip
+import io
 import json
 import os
 import pickle
@@ -24,7 +25,6 @@ from utils.tw.tensor_utils import (
     string2tensor,
 )
 from utils.tw.pose import quat_to_rotmat, rotmat_to_quat
-from tqdm import tqdm
 
 # pyre-unsafe
 
@@ -406,26 +406,20 @@ def load_semidense(
         with gzip.open(point_cache, "rb") as f:
             uid_to_p3 = pickle.load(f)
     else:
-        with gzip.open(global_path, "rt", newline="") as f:
-            reader = iter(csv.reader(f))
-            uid_to_p3 = {}
-            header = next(reader)
-            assert header.index("uid") == 0
-            assert header.index("px_world") == 2
-            assert header.index("py_world") == 3
-            assert header.index("pz_world") == 4
-            assert header.index("inv_dist_std") == 5
-            assert header.index("dist_std") == 6
-            for row in tqdm(reader):
-                uid = int(row[0])
-                px = float(row[2])
-                py = float(row[3])
-                pz = float(row[4])
-                inv_dist_std = float(row[5])
-                dist_std = float(row[6])
-                if (inv_dist_std > max_inv_depth_std) or (dist_std > max_depth_std):
-                    continue
-                uid_to_p3[uid] = (px, py, pz, inv_dist_std, dist_std)
+        with gzip.open(global_path, "rt") as f:
+            header = f.readline().strip().split(",")
+            col_uid = header.index("uid")
+            col_px = header.index("px_world")
+            col_py = header.index("py_world")
+            col_pz = header.index("pz_world")
+            col_ids = header.index("inv_dist_std")
+            col_ds = header.index("dist_std")
+            cols = [col_uid, col_px, col_py, col_pz, col_ids, col_ds]
+            raw = f.read()
+        data = np.loadtxt(io.StringIO(raw), delimiter=",", usecols=cols)
+        mask = (data[:, 4] <= max_inv_depth_std) & (data[:, 5] <= max_depth_std)
+        data = data[mask]
+        uid_to_p3 = {int(r[0]): (r[1], r[2], r[3], r[4], r[5]) for r in data}
         print(f"==> Writing to {point_cache}")
         with gzip.open(point_cache, "wb") as f:
             pickle.dump(uid_to_p3, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -443,32 +437,28 @@ def load_semidense(
             time_to_uids_slaml = pickle.load(f)
             time_to_uids_slamr = pickle.load(f)
     else:
-        with gzip.open(obs_path, "rt", newline="") as f:
-            reader = iter(csv.reader(f))
-            time_to_uids_slaml = defaultdict(list)
-            time_to_uids_slamr = defaultdict(list)
-            # time_to_uv = defaultdict(list)
-            header = next(reader)
-            assert header.index("uid") == 0
-            assert header.index("frame_tracking_timestamp_us") == 1
-            assert header.index("camera_serial") == 2
-            assert header.index("u") == 3
-            assert header.index("v") == 4
-            for row in tqdm(reader):
-                uid = int(row[0])
-                if uid not in uid_to_p3:
-                    continue
-                time_ns = int(row[1]) * 1000
-                serial = row[2]
-                label = serial2label[serial]
-                if label in ["camera-slam-left", "0", "slam-front-left"]:
-                    time_to_uids_slaml[time_ns].append(uid)
-                elif label in ["camera-slam-right", "1", "slam-front-right"]:
-                    time_to_uids_slamr[time_ns].append(uid)
-                else:
-                    continue
-                    # raise ValueError("semi-dense point observed by unknown camera")
-                # time_to_uv[time_ns].append((float(row[3]), float(row[4])))
+        with gzip.open(obs_path, "rt") as f:
+            header = f.readline().strip().split(",")
+            col_uid = header.index("uid")
+            col_ts = header.index("frame_tracking_timestamp_us")
+            col_serial = header.index("camera_serial")
+            raw = f.read()
+        time_to_uids_slaml = defaultdict(list)
+        time_to_uids_slamr = defaultdict(list)
+        valid_uids = set(uid_to_p3.keys())
+        slam_left = {"camera-slam-left", "0", "slam-front-left"}
+        slam_right = {"camera-slam-right", "1", "slam-front-right"}
+        for line in raw.splitlines():
+            parts = line.split(",")
+            uid = int(parts[col_uid])
+            if uid not in valid_uids:
+                continue
+            time_ns = int(parts[col_ts]) * 1000
+            label = serial2label[parts[col_serial]]
+            if label in slam_left:
+                time_to_uids_slaml[time_ns].append(uid)
+            elif label in slam_right:
+                time_to_uids_slamr[time_ns].append(uid)
         print(f"==> Writing to {obs_cache}")
         with gzip.open(obs_cache, "wb") as f:
             pickle.dump(time_to_uids_slaml, f, protocol=pickle.HIGHEST_PROTOCOL)

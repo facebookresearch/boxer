@@ -3658,7 +3658,8 @@ class TrackerViewer(SequenceOBBViewer):
         if init_follow_look_ahead is not None:
             self.follow_look_ahead = float(init_follow_look_ahead)
         self.camera_damping = 0.95  # 0 = instant snap, 1 = no movement
-        self._smooth_offset: Optional[np.ndarray] = None
+        self._smooth_eye: Optional[np.ndarray] = None
+        self._smooth_target: Optional[np.ndarray] = None
         self._smooth_up: Optional[np.ndarray] = None
         self.frustum_scale = 0.2 if seq_name.startswith("ca1m") else 0.1
 
@@ -3846,7 +3847,8 @@ class TrackerViewer(SequenceOBBViewer):
 
         if not self.follow_view:
             # Reset smoothing state when leaving follow mode
-            self._smooth_offset = None
+            self._smooth_eye = None
+            self._smooth_target = None
             self._smooth_up = None
             # Use 3D viewport aspect ratio instead of full window
             vw, vh = self._get_3d_viewport_size()
@@ -3884,23 +3886,8 @@ class TrackerViewer(SequenceOBBViewer):
         # "behind" is along the camera's negative-forward axis, "above" is world-Z
         offset_local = np.array([0.0, 0.0, -self.follow_behind])
         offset = R_wc @ offset_local + np.array([0.0, 0.0, self.follow_above])
-        up = np.array([0.0, 0.0, 1.0])
+        eye = cam_pos + offset
 
-        # Dampen only the rotation-dependent parts (offset direction),
-        # translation (cam_pos) tracks instantly so the camera never lags behind.
-        alpha = 1.0 - self.camera_damping
-        if self._smooth_offset is None:
-            self._smooth_offset = offset.copy()
-            self._smooth_up = up.copy()
-        else:
-            self._smooth_offset = alpha * offset + (1.0 - alpha) * self._smooth_offset
-            self._smooth_up = alpha * up + (1.0 - alpha) * self._smooth_up
-            # Re-normalize up to avoid drift
-            up_norm = np.linalg.norm(self._smooth_up)
-            if up_norm > 1e-6:
-                self._smooth_up /= up_norm
-
-        eye = cam_pos + self._smooth_offset
         # Look at a point in front of the camera, constrained to camera height.
         # This keeps follow view leveled while still steering with heading.
         forward_world = R_wc @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
@@ -3915,12 +3902,53 @@ class TrackerViewer(SequenceOBBViewer):
         target = cam_pos + forward_xy * float(self.follow_look_ahead)
         target[2] = cam_pos[2]
 
+        up = np.array([0.0, 0.0, 1.0])
+
+        # Smooth eye, target, and up for fluid follow-cam motion
+        alpha = 1.0 - self.camera_damping
+        if self._smooth_eye is None:
+            self._smooth_eye = eye.copy()
+            self._smooth_target = target.copy()
+            self._smooth_up = up.copy()
+        else:
+            self._smooth_eye = alpha * eye + (1.0 - alpha) * self._smooth_eye
+            self._smooth_target = alpha * target + (1.0 - alpha) * self._smooth_target
+            self._smooth_up = alpha * up + (1.0 - alpha) * self._smooth_up
+            # Re-normalize up to avoid drift
+            up_norm = np.linalg.norm(self._smooth_up)
+            if up_norm > 1e-6:
+                self._smooth_up /= up_norm
+
         vw, vh = self._get_3d_viewport_size()
         aspect = vw / vh
         projection = Matrix44.perspective_projection(45.0, aspect, 0.1, 100.0)
-        view = Matrix44.look_at(tuple(eye), tuple(target), tuple(self._smooth_up))
+        view = Matrix44.look_at(
+            tuple(self._smooth_eye),
+            tuple(self._smooth_target),
+            tuple(self._smooth_up),
+        )
         mvp = projection * view * Matrix44.identity()
         return projection, view, mvp
+
+    def _snap_orbit_from_follow(self):
+        """Snap orbit camera params to match the current follow-view position."""
+        if self._smooth_eye is None or self._smooth_target is None:
+            return
+
+        eye = self._smooth_eye
+        target = self._smooth_target
+
+        # Convert eye/target to orbit camera params
+        self.camera_target = target.copy()
+        diff = eye - target
+        self.camera_distance = float(np.linalg.norm(diff))
+        if self.camera_distance > 1e-6:
+            self.camera_elevation = float(
+                np.degrees(np.arcsin(diff[2] / self.camera_distance))
+            )
+            self.camera_azimuth = float(
+                np.degrees(np.arctan2(diff[1], diff[0]))
+            )
 
     def _get_params_snapshot(self) -> tuple:
         """Return a tuple of current tracker params for staleness comparison."""
@@ -5053,6 +5081,9 @@ class TrackerViewer(SequenceOBBViewer):
         if key == self.wnd.keys.ESCAPE:
             if action == self.wnd.keys.ACTION_PRESS:
                 self.is_playing = False
+                if self.follow_view:
+                    self._snap_orbit_from_follow()
+                    self.follow_view = False
             return
 
         # Only act on key press (not release)
@@ -5072,12 +5103,27 @@ class TrackerViewer(SequenceOBBViewer):
                     self.is_playing = True
                 else:
                     self.is_playing = not self.is_playing
+                # Sync follow view with play state
+                if self.is_playing:
+                    self._smooth_eye = None
+                    self._smooth_target = None
+                    self._smooth_up = None
+                    self.follow_view = True
+                else:
+                    self._snap_orbit_from_follow()
+                    self.follow_view = False
                 self._last_step_time = time_module.time()
             elif key == self.wnd.keys.RIGHT:
                 self.is_playing = False
+                if self.follow_view:
+                    self._snap_orbit_from_follow()
+                    self.follow_view = False
                 self._step_forward()
             elif key == self.wnd.keys.LEFT:
                 self.is_playing = False
+                if self.follow_view:
+                    self._snap_orbit_from_follow()
+                    self.follow_view = False
                 if self.current_frame_idx > 0:
                     self._step_to_frame(self.current_frame_idx - 1)
             return
@@ -5135,6 +5181,9 @@ class TrackerViewer(SequenceOBBViewer):
         # Auto-stop at end
         if self.is_playing and self.current_frame_idx >= self.total_frames - 1:
             self.is_playing = False
+            if self.follow_view:
+                self._snap_orbit_from_follow()
+                self.follow_view = False
             if self._autorecord and self._recording:
                 print(
                     "[REC] Reached final frame; stopping recording and encoding video..."
@@ -5361,19 +5410,36 @@ class TrackerViewer(SequenceOBBViewer):
             "Play" if not self.is_playing else "Pause", width=90, height=28
         ):
             self.is_playing = not self.is_playing
+            if self.is_playing:
+                self._smooth_eye = None
+                self._smooth_target = None
+                self._smooth_up = None
+                self.follow_view = True
+            else:
+                self._snap_orbit_from_follow()
+                self.follow_view = False
             self._last_step_time = time_module.time()
         imgui.same_line()
         if imgui.button("<", width=30, height=28):
             self.is_playing = False
+            if self.follow_view:
+                self._snap_orbit_from_follow()
+                self.follow_view = False
             if self.current_frame_idx > 0:
                 self._step_to_frame(self.current_frame_idx - 1)
         imgui.same_line()
         if imgui.button(">", width=30, height=28):
             self.is_playing = False
+            if self.follow_view:
+                self._snap_orbit_from_follow()
+                self.follow_view = False
             self._step_forward()
         imgui.same_line()
         if imgui.button("Reset", width=90, height=28):
             self.is_playing = False
+            if self.follow_view:
+                self._snap_orbit_from_follow()
+                self.follow_view = False
             self._seek_dirty_time = None
             self._params_dirty_time = None
             self._reset_tracker()
@@ -5390,6 +5456,9 @@ class TrackerViewer(SequenceOBBViewer):
         )
         if changed:
             self.is_playing = False
+            if self.follow_view:
+                self._snap_orbit_from_follow()
+                self.follow_view = False
             self._seek_target_frame = new_frame
             self._seek_dirty_time = time_module.time()
         imgui.pop_item_width()
@@ -5574,23 +5643,21 @@ class TrackerViewer(SequenceOBBViewer):
                 imgui.pop_item_width()
 
         self._section_header("Camera")
-        _changed, self.follow_view = imgui.checkbox("Follow View", self.follow_view)
-
-        if self.follow_view:
-            imgui.push_item_width(200)
-            _changed, self.camera_damping = imgui.slider_float(
-                "Camera Damping", self.camera_damping, 0.0, 0.99
-            )
-            _changed, self.follow_behind = imgui.slider_float(
-                "Behind Distance", self.follow_behind, 0.0, 10.0
-            )
-            _changed, self.follow_above = imgui.slider_float(
-                "Above Distance", self.follow_above, 0.0, 30.0
-            )
-            _changed, self.follow_look_ahead = imgui.slider_float(
-                "Look Ahead (m)", self.follow_look_ahead, 0.0, 10.0
-            )
-            imgui.pop_item_width()
+        imgui.text("Follow: ON" if self.follow_view else "Follow: OFF")
+        imgui.push_item_width(200)
+        _changed, self.camera_damping = imgui.slider_float(
+            "Camera Damping", self.camera_damping, 0.0, 0.99
+        )
+        _changed, self.follow_behind = imgui.slider_float(
+            "Behind Distance", self.follow_behind, 0.0, 10.0
+        )
+        _changed, self.follow_above = imgui.slider_float(
+            "Above Distance", self.follow_above, 0.0, 30.0
+        )
+        _changed, self.follow_look_ahead = imgui.slider_float(
+            "Look Ahead (m)", self.follow_look_ahead, 0.0, 10.0
+        )
+        imgui.pop_item_width()
 
         imgui.end()
 

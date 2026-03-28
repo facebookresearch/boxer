@@ -167,7 +167,8 @@ def main():
             self.follow_behind = 6.0
             self.follow_look_ahead = 2.0
             self.camera_damping = 0.92
-            self._smooth_offset = None
+            self._smooth_eye = None
+            self._smooth_target = None
             self._smooth_up = None
 
             super().__init__(
@@ -275,25 +276,7 @@ def main():
             offset = R_wc @ offset_local + np.array(
                 [0.0, 0.0, self.follow_above]
             )
-            up = np.array([0.0, 0.0, 1.0])
-
-            # Smooth the offset for less jerky motion
-            alpha = 1.0 - self.camera_damping
-            if self._smooth_offset is None:
-                self._smooth_offset = offset.copy()
-                self._smooth_up = up.copy()
-            else:
-                self._smooth_offset = (
-                    alpha * offset + (1.0 - alpha) * self._smooth_offset
-                )
-                self._smooth_up = (
-                    alpha * up + (1.0 - alpha) * self._smooth_up
-                )
-                norm = np.linalg.norm(self._smooth_up)
-                if norm > 1e-6:
-                    self._smooth_up /= norm
-
-            eye = cam_pos + self._smooth_offset
+            eye = cam_pos + offset
 
             # Look ahead along camera's forward direction (XY plane)
             forward_world = R_wc @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
@@ -308,51 +291,78 @@ def main():
             target = cam_pos + forward_xy * self.follow_look_ahead
             target[2] = cam_pos[2]
 
+            up = np.array([0.0, 0.0, 1.0])
+
+            # Smooth eye, target, and up for fluid follow-cam motion
+            alpha = 1.0 - self.camera_damping
+            if self._smooth_eye is None:
+                self._smooth_eye = eye.copy()
+                self._smooth_target = target.copy()
+                self._smooth_up = up.copy()
+            else:
+                self._smooth_eye = (
+                    alpha * eye + (1.0 - alpha) * self._smooth_eye
+                )
+                self._smooth_target = (
+                    alpha * target + (1.0 - alpha) * self._smooth_target
+                )
+                self._smooth_up = (
+                    alpha * up + (1.0 - alpha) * self._smooth_up
+                )
+                norm = np.linalg.norm(self._smooth_up)
+                if norm > 1e-6:
+                    self._smooth_up /= norm
+
             vw, vh = self._get_3d_viewport_size()
             aspect = vw / vh
             projection = Matrix44.perspective_projection(
                 45.0, aspect, 0.1, 100.0
             )
             view = Matrix44.look_at(
-                tuple(eye), tuple(target), tuple(self._smooth_up)
+                tuple(self._smooth_eye),
+                tuple(self._smooth_target),
+                tuple(self._smooth_up),
             )
             mvp = projection * view * Matrix44.identity()
             return projection, view, mvp
 
         def _focus_on_current_frame(self):
             """Snap orbit camera above current frame using follow-view params."""
-            if self.total_frames == 0:
-                return
-            ts = self.sorted_timestamps[self.current_frame_idx]
-            cam, T_wr = self._get_cam_and_pose(ts)
-            if cam is None or T_wr is None:
-                return
-            T_wc = T_wr @ cam.T_camera_rig.inverse()
-            cam_pos = T_wc.t.reshape(3).cpu().float().numpy()
-            R_wc = T_wc.R.reshape(3, 3).cpu().float().numpy()
+            if self._smooth_eye is not None and self._smooth_target is not None:
+                # Use smoothed state for seamless transition
+                eye = self._smooth_eye
+                target = self._smooth_target
+            elif self.total_frames > 0:
+                ts = self.sorted_timestamps[self.current_frame_idx]
+                cam, T_wr = self._get_cam_and_pose(ts)
+                if cam is None or T_wr is None:
+                    return
+                T_wc = T_wr @ cam.T_camera_rig.inverse()
+                cam_pos = T_wc.t.reshape(3).cpu().float().numpy()
+                R_wc = T_wc.R.reshape(3, 3).cpu().float().numpy()
 
-            # Compute eye position using follow-view params
-            offset_local = np.array([0.0, 0.0, -self.follow_behind])
-            offset = R_wc @ offset_local + np.array(
-                [0.0, 0.0, self.follow_above]
-            )
-            eye = cam_pos + offset
+                offset_local = np.array([0.0, 0.0, -self.follow_behind])
+                offset = R_wc @ offset_local + np.array(
+                    [0.0, 0.0, self.follow_above]
+                )
+                eye = cam_pos + offset
 
-            # Look-ahead target
-            forward_world = R_wc @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
-            forward_xy = np.array(
-                [forward_world[0], forward_world[1], 0.0], dtype=np.float32
-            )
-            fwd_norm = np.linalg.norm(forward_xy)
-            if fwd_norm > 1e-6:
-                forward_xy /= fwd_norm
+                forward_world = R_wc @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
+                forward_xy = np.array(
+                    [forward_world[0], forward_world[1], 0.0], dtype=np.float32
+                )
+                fwd_norm = np.linalg.norm(forward_xy)
+                if fwd_norm > 1e-6:
+                    forward_xy /= fwd_norm
+                else:
+                    forward_xy = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                target = cam_pos + forward_xy * self.follow_look_ahead
+                target[2] = cam_pos[2]
             else:
-                forward_xy = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-            target = cam_pos + forward_xy * self.follow_look_ahead
-            target[2] = cam_pos[2]
+                return
 
             # Convert eye/target to orbit camera params
-            self.camera_target = target
+            self.camera_target = target.copy()
             diff = eye - target
             self.camera_distance = float(np.linalg.norm(diff))
             if self.camera_distance > 1e-6:
@@ -364,7 +374,8 @@ def main():
                 )
 
             # Reset smoothing so follow-view starts clean if toggled on
-            self._smooth_offset = None
+            self._smooth_eye = None
+            self._smooth_target = None
             self._smooth_up = None
 
         # ── Mouse interaction ────────────────────────────────────────
@@ -982,14 +993,28 @@ def main():
                 "Play" if not self.is_playing else "Pause", width=90, height=32
             ):
                 self.is_playing = not self.is_playing
+                if self.is_playing:
+                    self._smooth_eye = None
+                    self._smooth_target = None
+                    self._smooth_up = None
+                    self.follow_view = True
+                else:
+                    self._focus_on_current_frame()
+                    self.follow_view = False
                 self._last_step_time = time_module.time()
             imgui.same_line()
             if imgui.button("<", width=32, height=32):
                 self.is_playing = False
+                if self.follow_view:
+                    self._focus_on_current_frame()
+                    self.follow_view = False
                 self._step_to_frame(self.current_frame_idx - 1)
             imgui.same_line()
             if imgui.button(">", width=32, height=32):
                 self.is_playing = False
+                if self.follow_view:
+                    self._focus_on_current_frame()
+                    self.follow_view = False
                 self._step_forward()
 
             if self.total_frames > 0:
@@ -1004,6 +1029,9 @@ def main():
                 )
                 if changed:
                     self.is_playing = False
+                    if self.follow_view:
+                        self._focus_on_current_frame()
+                        self.follow_view = False
                     self._step_to_frame(new_frame)
                 imgui.pop_item_width()
 
@@ -1104,9 +1132,7 @@ def main():
                 imgui.text("No semi-dense points loaded")
 
             self._section_header("Camera")
-            _changed, self.follow_view = imgui.checkbox(
-                "Follow View", self.follow_view
-            )
+            imgui.text("Follow: ON" if self.follow_view else "Follow: OFF")
             imgui.push_item_width(200)
             _changed, self.camera_damping = imgui.slider_float(
                 "Damping", self.camera_damping, 0.0, 0.99
@@ -1127,7 +1153,7 @@ def main():
             # Help
             self._section_header("Help")
             _help = [
-                ("Space", "Play / Pause"),
+                ("Space", "Play (follow) / Pause (free cam)"),
                 ("Left / Right", "Step frame"),
                 ("Left click", "Draw 2D box prompt"),
                 ("Right drag", "Orbit camera"),
@@ -1317,6 +1343,50 @@ def main():
                 self._upload_rgb_texture(blended)
             else:
                 self._upload_rgb_texture(rgb)
+
+        def on_key_event(self, key, action, modifiers):
+            """Override to sync follow_view with play/pause."""
+            if key == self.wnd.keys.ESCAPE:
+                if action == self.wnd.keys.ACTION_PRESS:
+                    self.is_playing = False
+                    if self.follow_view:
+                        self._focus_on_current_frame()
+                        self.follow_view = False
+                return
+
+            if action != self.wnd.keys.ACTION_PRESS:
+                super().on_key_event(key, action, modifiers)
+                return
+
+            if key == self.wnd.keys.SPACE:
+                if self.current_frame_idx >= self.total_frames - 1:
+                    self._step_to_frame(0)
+                    self.is_playing = True
+                else:
+                    self.is_playing = not self.is_playing
+                if self.is_playing:
+                    self._smooth_eye = None
+                    self._smooth_target = None
+                    self._smooth_up = None
+                    self.follow_view = True
+                else:
+                    self._focus_on_current_frame()
+                    self.follow_view = False
+                self._last_step_time = time.time()
+            elif key == self.wnd.keys.RIGHT:
+                self.is_playing = False
+                if self.follow_view:
+                    self._focus_on_current_frame()
+                    self.follow_view = False
+                self._step_forward()
+            elif key == self.wnd.keys.LEFT:
+                self.is_playing = False
+                if self.follow_view:
+                    self._focus_on_current_frame()
+                    self.follow_view = False
+                self._step_to_frame(self.current_frame_idx - 1)
+            else:
+                super().on_key_event(key, action, modifiers)
 
         def _step_to_frame(self, target_idx: int) -> None:
             """Override to update prompted OBB projections on frame change."""

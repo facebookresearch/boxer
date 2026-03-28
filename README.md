@@ -29,7 +29,7 @@ See [boxernet/README.md](boxernet/README.md) for architecture details.
 conda create -n boxer python=3.12
 conda activate boxer
 
-pip install 'torch>=2.0' opencv-python tqdm
+pip install 'numpy>=1.24' 'torch>=2.0' 'opencv-python>=4.8' tqdm
 
 # ffmpeg (required for video output)
 # macOS: brew install ffmpeg

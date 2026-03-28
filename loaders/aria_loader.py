@@ -149,14 +149,9 @@ class AriaLoader(BaseLoader):
             device_type = self.provider.get_file_tags()["device_type"].lower()
         except Exception:
             device_type = "unknown"
-        print("========> Yo! Got device type of %s" % device_type)
-        if device_type in ["oatmeal"]:
-            self.is_nebula = True
-            self.device_name = "Aria Gen 2"
-        else:
-            self.is_nebula = False
-            self.device_name = "Aria Gen 1"
-        print("==> device name of %s" % self.device_name)
+        self.is_nebula = device_type in ["oatmeal", "aria gen 2"]
+        self.device_name = "Aria Gen 2" if self.is_nebula else "Aria Gen 1"
+        print(f"==> Device: {self.device_name} (type={device_type})")
 
         calib_path = os.path.join(remote_root, "online_calibration.jsonl")
         slaml_calibs, slamr_calibs, rgb_calibs, calib_ns = load_online_calib(calib_path)
