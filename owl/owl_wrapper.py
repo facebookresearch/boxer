@@ -81,6 +81,38 @@ class VisionDetectorWrapper(torch.nn.Module):
 _CKPT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ckpts", "owlv2-base-patch16-ensemble.pt")
 
 
+def _per_class_nms(boxes, scores, labels, iou_threshold):
+    """Per-class greedy NMS. boxes: (N,4) x1y1x2y2, scores/labels: (N,)."""
+    keep = []
+    for cls in labels.unique():
+        cls_mask = labels == cls
+        cls_idx = cls_mask.nonzero(as_tuple=True)[0]
+        cls_scores = scores[cls_idx]
+        cls_boxes = boxes[cls_idx]
+        # Sort by score descending
+        order = cls_scores.argsort(descending=True)
+        cls_idx = cls_idx[order]
+        cls_boxes = cls_boxes[order]
+        # Greedy suppress
+        suppressed = torch.zeros(len(cls_idx), dtype=torch.bool)
+        for i in range(len(cls_idx)):
+            if suppressed[i]:
+                continue
+            keep.append(cls_idx[i].item())
+            # IoU of box i with all subsequent boxes
+            ix1 = torch.max(cls_boxes[i, 0], cls_boxes[i + 1:, 0])
+            iy1 = torch.max(cls_boxes[i, 1], cls_boxes[i + 1:, 1])
+            ix2 = torch.min(cls_boxes[i, 2], cls_boxes[i + 1:, 2])
+            iy2 = torch.min(cls_boxes[i, 3], cls_boxes[i + 1:, 3])
+            inter = (ix2 - ix1).clamp(min=0) * (iy2 - iy1).clamp(min=0)
+            area_i = (cls_boxes[i, 2] - cls_boxes[i, 0]) * (cls_boxes[i, 3] - cls_boxes[i, 1])
+            area_j = (cls_boxes[i + 1:, 2] - cls_boxes[i + 1:, 0]) * (cls_boxes[i + 1:, 3] - cls_boxes[i + 1:, 1])
+            iou = inter / (area_i + area_j - inter + 1e-6)
+            suppressed[i + 1:] |= iou > iou_threshold
+    keep.sort()
+    return keep
+
+
 class OwlWrapper(torch.nn.Module):
     """
     Runs OWLv2 open-set 2D BB detector.
@@ -94,7 +126,7 @@ class OwlWrapper(torch.nn.Module):
     Use set_text_prompts() to change prompts without re-creating the wrapper.
     """
 
-    def __init__(self, device="cuda", text_prompts=None, min_confidence=0.2, precision="float32", warmup=True):
+    def __init__(self, device="cuda", text_prompts=None, min_confidence=0.2, precision="float32", warmup=True, nms_iou_threshold=0.5):
         super().__init__()
         _debug = os.environ.get("DEBUG", "0") == "1"
         _t0 = time.perf_counter()
@@ -140,6 +172,7 @@ class OwlWrapper(torch.nn.Module):
         self.device = device
         self.text_prompts = text_prompts
         self.min_confidence = min_confidence
+        self.nms_iou_threshold = nms_iou_threshold
         self.use_bfloat16 = (precision == "bfloat16" and device not in ("cpu", "mps"))
 
         # Load vision detector: nn.Module for bfloat16 (explicit casting),
@@ -293,6 +326,16 @@ class OwlWrapper(torch.nn.Module):
         boxes = boxes[keep]
         scores = scores[keep]
         labels = labels[keep]
+
+        if len(boxes) == 0:
+            return empty_return
+
+        # Per-class NMS
+        if self.nms_iou_threshold < 1.0:
+            keep = _per_class_nms(boxes, scores, labels, self.nms_iou_threshold)
+            boxes = boxes[keep]
+            scores = scores[keep]
+            labels = labels[keep]
 
         if len(boxes) == 0:
             return empty_return

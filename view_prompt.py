@@ -24,6 +24,7 @@ import torch
 from pyrr import Matrix44
 
 from boxernet.boxernet import BoxerNet, sdp_to_patches
+from owl.owl_wrapper import OwlWrapper
 from utils.tw.camera import CameraTW
 from utils.tw.obb import BB3D_LINE_ORDERS, ObbTW
 from utils.tw.pose import PoseTW
@@ -88,6 +89,10 @@ def main():
         torch.bfloat16 if args.precision == "bfloat16" else torch.float32
     )
 
+    # Load OWLv2 open-vocabulary detector
+    owl = OwlWrapper(device, text_prompts=["object"], min_confidence=0.2,
+                     precision=args.precision)
+
     # Build one timed_obbs entry per actual RGB frame (not per pose timestamp).
     # For Aria, seq_ctx["rgb_timestamps"] is pose_ts (~200Hz); we need the real
     # per-frame capture timestamps (~10Hz) so each step shows a new image.
@@ -100,6 +105,21 @@ def main():
         for i in range(n_frames):
             _, record = loader.provider.get_image_data_by_index(stream_id, i)
             frame_ts.append(record.capture_timestamp_ns)
+
+        # Restrict to intersection of traj and sdp time ranges so every
+        # sampled frame has valid pose and semi-dense points.
+        range_start = -float("inf")
+        range_end = float("inf")
+        pose_ts = getattr(loader, "pose_ts", None)
+        if pose_ts is not None and len(pose_ts) > 0:
+            range_start = max(range_start, float(min(pose_ts)))
+            range_end = min(range_end, float(max(pose_ts)))
+        sdp_ts = getattr(loader, "sdp_times_combined", None)
+        if sdp_ts is not None and len(sdp_ts) > 0:
+            range_start = max(range_start, float(min(sdp_ts)))
+            range_end = min(range_end, float(max(sdp_ts)))
+        frame_ts = [ts for ts in frame_ts if range_start <= ts <= range_end]
+
         empty_timed_obbs = {int(ts): empty_obb for ts in frame_ts}
     else:
         empty_timed_obbs = {int(ts): empty_obb for ts in seq_ctx["rgb_timestamps"]}
@@ -116,13 +136,23 @@ def main():
             self._prompted_obbs: list[ObbTW] = []
             self._prompted_labels: list[str] = []
             self._prompted_colors: list[tuple[float, float, float]] = []
+            self._owl_text = "chair"
+            self._owl_stage = 0  # 0=idle, 1=showing 2D BBs, 2=showing 3D BBs
+            self._owl_stage_time = 0.0
+            self._owl_2d_boxes = []  # (N, 4) raw image coords (x1, x2, y1, y2)
+            self._owl_2d_scores = []  # (N,) float
+            self._owl_2d_colors = []  # (N,) pre-assigned colors
+            self._owl_3d_confs = []  # (N,) float, set after lift
+            self._owl_cached_datum = None
+            self._owl_dt_owl = 0.0
+            self._owl_dt_bxr = 0.0
             self._drawing = False
             self._draw_start: tuple[float, float] | None = None
             self._draw_end: tuple[float, float] | None = None
             self._draw_start_screen: tuple[float, float] | None = None
             self._draw_end_screen: tuple[float, float] | None = None
             self._prompt_dirty = False
-            self.conf_threshold = 0.7
+            self.conf_threshold = 0.6
             self._flash_text = ""
             self._flash_time = 0.0  # time remaining for flash
             self._flash_color = (0.0, 1.0, 0.0)  # green by default
@@ -508,14 +538,14 @@ def main():
                 return
 
             H, W = img_np.shape[:2]
-            bnet_hw = boxernet.hw
-            img_resized = cv2.resize(img_np, (bnet_hw, bnet_hw))
+            bxr_hw = boxernet.hw
+            img_resized = cv2.resize(img_np, (bxr_hw, bxr_hw))
             img_torch = (
                 torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
             )
 
-            scale_x = bnet_hw / W
-            scale_y = bnet_hw / H
+            scale_x = bxr_hw / W
+            scale_y = bxr_hw / H
             bb2d = torch.tensor(
                 [[xmin * scale_x, xmax * scale_x, ymin * scale_y, ymax * scale_y]],
                 dtype=torch.float32,
@@ -523,8 +553,8 @@ def main():
 
             cam_data = cam._data.clone()
             cam_scaled = CameraTW(cam_data)
-            cam_scaled._data[0] = bnet_hw
-            cam_scaled._data[1] = bnet_hw
+            cam_scaled._data[0] = bxr_hw
+            cam_scaled._data[1] = bxr_hw
             cam_scaled._data[2] *= scale_x
             cam_scaled._data[3] *= scale_y
             cam_scaled._data[4] *= scale_x
@@ -589,6 +619,175 @@ def main():
 
                 traceback.print_exc()
                 print(f"  -> BoxerNet error: {e}")
+
+        def _image_to_screen_coords(self, img_u, img_v):
+            """Convert raw image pixel coords to screen coords (inverse of _screen_to_image_coords)."""
+            rect = getattr(self, "_img_screen_rect", None)
+            if rect is None:
+                return None
+            ix, iy, iw, ih = rect
+            # Aria Gen 1: apply rot90 k=3
+            if not self._vrs_is_nebula:
+                disp_u = self._rgb_vrs_w - 1 - img_v
+                disp_v = img_u
+            else:
+                disp_u = img_u
+                disp_v = img_v
+            u_norm = disp_u / self._rgb_vrs_w
+            v_norm = disp_v / self._rgb_vrs_h
+            return ix + u_norm * iw, iy + v_norm * ih
+
+        def _run_owl_prompt(self):
+            """Run OWL 2D detection and enter stage 1 (showing 2D BBs)."""
+            self._owl_stage = 0  # reset so early returns don't re-trigger
+            if self.total_frames == 0:
+                return
+
+            ts_ns = self.sorted_timestamps[self.current_frame_idx]
+            cam, T_wr = self._get_cam_and_pose(ts_ns)
+            if cam is None or T_wr is None:
+                print("No camera/pose available for this frame")
+                return
+
+            img_np = self._load_raw_image(ts_ns)
+            if img_np is None:
+                print("Failed to load raw image")
+                return
+
+            H, W = img_np.shape[:2]
+            rotated = not self._vrs_is_nebula
+
+            # Run OWL 2D detection
+            owl.set_text_prompts([self._owl_text])
+            img_torch_255 = (
+                torch.from_numpy(img_np).permute(2, 0, 1).float()[None]
+            )  # (1, 3, H, W) in [0, 255]
+            t0 = time.perf_counter()
+            boxes, scores2d, label_ints, _ = owl.forward(
+                img_torch_255, rotated, resize_to_HW=(906, 906)
+            )
+            self._owl_dt_owl = (time.perf_counter() - t0) * 1000
+
+            n_dets = len(boxes)
+            if n_dets == 0:
+                print(f"OWL: 0 detections for '{self._owl_text}' ({self._owl_dt_owl:.0f}ms)")
+                self._flash_text = f"0 detections for '{self._owl_text}'"
+                self._flash_color = (1.0, 0.2, 0.2)
+                self._flash_time = 1.5
+                rect = getattr(self, "_img_screen_rect", None)
+                if rect is not None:
+                    self._flash_screen_pos = (
+                        rect[0] + rect[2] / 2,
+                        rect[1] + rect[3] / 2,
+                    )
+                return
+
+            # Store 2D results for overlay, pre-assign colors to match 3D
+            self._owl_2d_boxes = boxes.numpy()  # (N, 4) in (x1, x2, y1, y2) raw image coords
+            self._owl_2d_scores = scores2d.numpy()  # (N,)
+            base = len(self._prompted_obbs)
+            self._owl_2d_colors = [
+                _BOX_COLORS[(base + 1 + i) % len(_BOX_COLORS)]
+                for i in range(n_dets)
+            ]
+
+            # Cache BoxerNet datum for stage 2
+            bxr_hw = boxernet.hw
+            scale_x = bxr_hw / W
+            scale_y = bxr_hw / H
+            bb2d = boxes.clone()
+            bb2d[:, 0] *= scale_x
+            bb2d[:, 1] *= scale_x
+            bb2d[:, 2] *= scale_y
+            bb2d[:, 3] *= scale_y
+
+            img_resized = cv2.resize(img_np, (bxr_hw, bxr_hw))
+            img_torch = (
+                torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
+            )
+
+            cam_data = cam._data.clone()
+            cam_scaled = CameraTW(cam_data)
+            cam_scaled._data[0] = bxr_hw
+            cam_scaled._data[1] = bxr_hw
+            cam_scaled._data[2] *= scale_x
+            cam_scaled._data[3] *= scale_y
+            cam_scaled._data[4] *= scale_x
+            cam_scaled._data[5] *= scale_y
+
+            sdp_w = self._get_sdp_for_timestamp(ts_ns)
+
+            datum = {
+                "img0": img_torch[None],
+                "cam0": cam_scaled.float(),
+                "T_world_rig0": T_wr.float(),
+                "rotated0": torch.tensor([rotated]),
+                "sdp_w": sdp_w.float(),
+                "bb2d": bb2d,
+            }
+            for k, v in datum.items():
+                if isinstance(v, torch.Tensor):
+                    datum[k] = v.to(device)
+                elif hasattr(v, "_data"):
+                    datum[k] = v.to(device)
+            self._owl_cached_datum = datum
+
+            print(f"OWL: {n_dets} detections for '{self._owl_text}' ({self._owl_dt_owl:.0f}ms)")
+            self._owl_stage = 1
+            self._owl_stage_time = 12.0
+
+        def _run_owl_lift(self):
+            """Stage 2: lift cached OWL 2D BBs to 3D via BoxerNet."""
+            datum = self._owl_cached_datum
+            if datum is None:
+                self._owl_stage = 0
+                return
+
+            try:
+                t1 = time.perf_counter()
+                if device == "mps":
+                    outputs = boxernet.forward(datum)
+                else:
+                    with torch.autocast(device_type=device, dtype=precision_dtype):
+                        outputs = boxernet.forward(datum)
+                obb_pr_w = outputs["obbs_pr_w"].cpu()[0]  # (M, ...)
+                self._owl_dt_bxr = (time.perf_counter() - t1) * 1000
+
+                self._owl_3d_confs = []
+                n_accepted = 0
+                for i in range(len(obb_pr_w)):
+                    obb = obb_pr_w[i]
+                    conf = float(obb.prob.squeeze())
+                    self._owl_3d_confs.append(conf)
+                    if conf >= self.conf_threshold:
+                        n_accepted += 1
+                        self._prompted_obbs.append(obb)
+                        self._prompted_labels.append(self._owl_text)
+                        self._prompted_colors.append(
+                            self._owl_2d_colors[i
+                            ]
+                        )
+
+                self._prompt_dirty = True
+                n_dets = len(obb_pr_w)
+                timing = (
+                    f"owl:{self._owl_dt_owl:.0f}ms bxr:{self._owl_dt_bxr:.0f}ms"
+                )
+                print(
+                    f"BoxerNet lift: {n_accepted}/{n_dets} accepted "
+                    f"(>={self.conf_threshold:.2f}) {timing}"
+                )
+
+                self._owl_stage = 2
+                self._owl_stage_time = 2.0
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc()
+                print(f"  -> BoxerNet lift error: {e}")
+                self._owl_stage = 0
+
+            self._owl_cached_datum = None
 
         def _load_raw_image(self, ts_ns):
             """Load the raw (unscaled, unrotated) RGB image for a timestamp."""
@@ -961,12 +1160,105 @@ def main():
                 tw = len(self._flash_text) * 7 + 16
                 tx = cx - tw * 0.5
                 ty = cy - 10
-                bg = imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 0.6 * alpha)
-                draw_list.add_rect_filled(
-                    tx, ty - 4, tx + tw, ty + 20, bg, 4.0
-                )
                 col = imgui.get_color_u32_rgba(r, g, b, alpha)
                 draw_list.add_text(tx + 8, ty, col, self._flash_text)
+
+            # ── OWL staged detection overlay ─────────────────────────
+            if self._owl_stage == -1:
+                # Frame 1: show "Detecting..." overlay, advance to stage -2
+                rect = getattr(self, "_img_screen_rect", None)
+                if rect is not None:
+                    draw_list = imgui.get_foreground_draw_list()
+                    cx = rect[0] + rect[2] / 2
+                    cy = rect[1] + rect[3] / 2
+                    text = f"Detecting '{self._owl_text}'..."
+                    tw = len(text) * 7 + 16
+                    col = imgui.get_color_u32_rgba(1.0, 1.0, 0.2, 1.0)
+                    draw_list.add_text(
+                        cx - tw / 2 + 8, cy - 8, col, text
+                    )
+                self._owl_stage = -2  # will run OWL next frame
+
+            elif self._owl_stage == -2:
+                # Frame 2: run OWL (blocks), keep showing overlay
+                rect = getattr(self, "_img_screen_rect", None)
+                if rect is not None:
+                    draw_list = imgui.get_foreground_draw_list()
+                    cx = rect[0] + rect[2] / 2
+                    cy = rect[1] + rect[3] / 2
+                    text = f"Detecting '{self._owl_text}'..."
+                    tw = len(text) * 7 + 16
+                    col = imgui.get_color_u32_rgba(1.0, 1.0, 0.2, 1.0)
+                    draw_list.add_text(
+                        cx - tw / 2 + 8, cy - 8, col, text
+                    )
+                self._run_owl_prompt()
+
+            if self._owl_stage > 0:
+                self._owl_stage_time -= 1.0 / 60.0
+                draw_list = imgui.get_foreground_draw_list()
+
+                if self._owl_stage == 1:
+                    # Draw 2D BBs with scores on the image
+                    for i, (box, score) in enumerate(
+                        zip(self._owl_2d_boxes, self._owl_2d_scores)
+                    ):
+                        x1, x2, y1, y2 = box
+                        tl = self._image_to_screen_coords(x1, y1)
+                        br = self._image_to_screen_coords(x2, y2)
+                        if tl is None or br is None:
+                            continue
+                        color = self._owl_2d_colors[i]
+                        col = imgui.get_color_u32_rgba(
+                            color[0], color[1], color[2], 0.9
+                        )
+                        draw_list.add_rect(
+                            tl[0], tl[1], br[0], br[1], col, thickness=6.0
+                        )
+                        # Score label at top-left of box
+                        label = f"{score:.2f}"
+                        draw_list.add_text(
+                            tl[0] + 4, tl[1] - 16, col, label
+                        )
+
+                    # Lift to 3D on the next frame (so 2D BBs render first)
+                    if self._owl_stage_time < 12.0:
+                        self._run_owl_lift()
+
+                elif self._owl_stage == 2:
+                    # Draw 2D BBs colored by 3D acceptance
+                    for i, (box, conf3d) in enumerate(
+                        zip(self._owl_2d_boxes, self._owl_3d_confs)
+                    ):
+                        x1, x2, y1, y2 = box
+                        tl = self._image_to_screen_coords(x1, y1)
+                        br = self._image_to_screen_coords(x2, y2)
+                        if tl is None or br is None:
+                            continue
+                        accepted = conf3d >= self.conf_threshold
+                        if accepted:
+                            color = self._owl_2d_colors[i]
+                            col = imgui.get_color_u32_rgba(
+                                color[0], color[1], color[2], 0.9
+                            )
+                        else:
+                            col = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 0.5)
+                        draw_list.add_rect(
+                            tl[0], tl[1], br[0], br[1], col, thickness=3.0
+                        )
+                        # 3D conf label
+                        tag = "3D" if accepted else "rej"
+                        label = f"{tag} {conf3d:.2f}"
+                        draw_list.add_text(
+                            tl[0] + 4, tl[1] - 16, col, label
+                        )
+
+                    if self._owl_stage_time <= 0:
+                        self._owl_stage = 0
+                        self._owl_2d_boxes = []
+                        self._owl_2d_scores = []
+                        self._owl_2d_colors = []
+                        self._owl_3d_confs = []
 
             # ── Bottom playback bar ──────────────────────────────────
             self._render_bottom_playback_bar()
@@ -976,7 +1268,7 @@ def main():
             import time as time_module
 
             win_w, win_h = self.wnd.size
-            bar_h = 60
+            bar_h = 95
             imgui.set_next_window_position(0, win_h - bar_h, imgui.ALWAYS)
             imgui.set_next_window_size(win_w, bar_h, imgui.ALWAYS)
             imgui.begin(
@@ -990,7 +1282,7 @@ def main():
             )
 
             if imgui.button(
-                "Play" if not self.is_playing else "Pause", width=90, height=32
+                "Play" if not self.is_playing else "Pause", width=120, height=45
             ):
                 self.is_playing = not self.is_playing
                 if self.is_playing:
@@ -1003,14 +1295,14 @@ def main():
                     self.follow_view = False
                 self._last_step_time = time_module.time()
             imgui.same_line()
-            if imgui.button("<", width=32, height=32):
+            if imgui.button("<", width=45, height=45):
                 self.is_playing = False
                 if self.follow_view:
                     self._focus_on_current_frame()
                     self.follow_view = False
                 self._step_to_frame(self.current_frame_idx - 1)
             imgui.same_line()
-            if imgui.button(">", width=32, height=32):
+            if imgui.button(">", width=45, height=45):
                 self.is_playing = False
                 if self.follow_view:
                     self._focus_on_current_frame()
@@ -1048,13 +1340,25 @@ def main():
             """Render prompt + visualization controls (playback is in bottom bar)."""
             # Prompt controls (in sidebar)
             self._section_header("Prompt")
-            imgui.text(f"Prompted boxes: {len(self._prompted_obbs)}")
-            imgui.text("Draw a box on the image")
-            imgui.push_item_width(200)
-            _changed, self.conf_threshold = imgui.slider_float(
-                "Conf Threshold", self.conf_threshold, 0.0, 1.0
+            imgui.text_colored("Option A: Drag a 2DBB", 0.0, 1.0, 0.0)
+
+            # OWL text-prompt detection
+            imgui.spacing()
+            imgui.text_colored("Option B: Detect Text (OWL)", 0.2, 0.8, 1.0)
+            imgui.spacing()
+            imgui.push_item_width(300)
+            enter_pressed, self._owl_text = imgui.input_text(
+                "##owl_prompt", self._owl_text, 256,
+                flags=imgui.INPUT_TEXT_ENTER_RETURNS_TRUE,
             )
+            if enter_pressed:
+                imgui.set_keyboard_focus_here(-1)
             imgui.pop_item_width()
+            imgui.same_line()
+            if (imgui.button("Detect") or enter_pressed) and self._owl_stage == 0:
+                self._owl_stage = -1  # pending: renders overlay, then runs OWL
+            imgui.spacing()
+
             if imgui.button("Clear All"):
                 self._prompted_obbs.clear()
                 self._prompted_labels.clear()
@@ -1067,6 +1371,16 @@ def main():
                     self._prompted_labels.pop()
                     self._prompted_colors.pop()
                     self._prompt_dirty = True
+
+            imgui.push_item_width(200)
+            _changed, owl.min_confidence = imgui.slider_float(
+                "2DBB Conf Threshold", owl.min_confidence, 0.0, 1.0
+            )
+            _changed, self.conf_threshold = imgui.slider_float(
+                "3DBB Conf Threshold", self.conf_threshold, 0.0, 1.0
+            )
+            imgui.pop_item_width()
+            imgui.text(f"Total 3D boxes: {len(self._prompted_obbs)}")
 
             self._section_header("Visualization")
             imgui.push_item_width(200)
@@ -1153,19 +1467,16 @@ def main():
             # Help
             self._section_header("Help")
             _help = [
-                ("Space", "Play (follow) / Pause (free cam)"),
-                ("Left / Right", "Step frame"),
-                ("Left click", "Draw 2D box prompt"),
-                ("Right drag", "Orbit camera"),
-                ("Middle drag", "Pan camera"),
-                ("Scroll", "Zoom"),
-                ("Escape", "Pause"),
+                "[Space] Play / Pause",
+                "[Left / Right] Step Frame",
+                "[Left click] Draw 2D Box",
+                "[Right drag] Orbit Camera",
+                "[Middle drag] Pan Camera",
+                "[Scroll] Zoom",
+                "[Escape] Quit",
             ]
-            for key, desc in _help:
-                imgui.text_colored(key, 0.5, 0.8, 1.0)
-                imgui.same_line(140)
-                imgui.text(desc)
-                imgui.spacing()
+            for line in _help:
+                imgui.text(line)
 
         def _reupload_rgb_with_sdp(self):
             """Re-upload RGB texture with projected SDP depth overlay."""
@@ -1294,16 +1605,16 @@ def main():
                 return
 
             # Scale camera to boxernet resolution
-            bnet_hw = boxernet.hw
+            bxr_hw = boxernet.hw
             patch_size = boxernet.patch_size
             cam_data = cam._data.clone()
             cam_scaled = CameraTW(cam_data)
             vrs_w = cam.size[..., 0].item()
             vrs_h = cam.size[..., 1].item()
-            scale_x = bnet_hw / vrs_w
-            scale_y = bnet_hw / vrs_h
-            cam_scaled._data[0] = bnet_hw
-            cam_scaled._data[1] = bnet_hw
+            scale_x = bxr_hw / vrs_w
+            scale_y = bxr_hw / vrs_h
+            cam_scaled._data[0] = bxr_hw
+            cam_scaled._data[1] = bxr_hw
             cam_scaled._data[2] *= scale_x
             cam_scaled._data[3] *= scale_y
             cam_scaled._data[4] *= scale_x
@@ -1314,7 +1625,7 @@ def main():
                 sdp_w.unsqueeze(0).float(),
                 cam_scaled.float(),
                 T_wr.float(),
-                bnet_hw, bnet_hw, patch_size,
+                bxr_hw, bxr_hw, patch_size,
             )  # (1, 1, fH, fW)
 
             rotated = not self._vrs_is_nebula
@@ -1346,6 +1657,13 @@ def main():
 
         def on_key_event(self, key, action, modifiers):
             """Override to sync follow_view with play/pause."""
+            # When imgui text input is focused, forward key to imgui but
+            # don't process viewer shortcuts (space, arrows, etc.)
+            io = imgui.get_io()
+            if io.want_capture_keyboard:
+                self.imgui.key_event(key, action, modifiers)
+                return
+
             if key == self.wnd.keys.ESCAPE:
                 if action == self.wnd.keys.ACTION_PRESS:
                     self.is_playing = False
