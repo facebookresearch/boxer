@@ -115,7 +115,7 @@ def main():
     parser.add_argument("--fuse", action="store_true", help="run offline 3D box fusion after processing")
     parser.add_argument("--track", action="store_true", help="run online 3D box tracking and show tracked boxes in Top Down View")
     parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "boxernet_hw960in2x6d768.ckpt"), help="path to BoxerNet checkpoint")
-    parser.add_argument("--precision", type=str, default="float32", choices=["float32", "bfloat16"], help="Inference precision (default: float32)")
+    parser.add_argument("--force_precision", type=str, default=None, choices=["float32", "bfloat16"], help="Override auto-detected inference precision")
     parser.add_argument("--output_dir", type=str, default=EVAL_PATH, help="Output directory for results (default: output/)")
     args = parser.parse_args()
 
@@ -293,7 +293,7 @@ def main():
             device,
             text_prompts=text_labels,
             min_confidence=args.thresh2d,
-            precision=args.precision,
+            precision=args.force_precision,
         )
         method = "OWLv2"
     _dbg("owl")
@@ -503,9 +503,12 @@ def main():
         cam = datum["cam0"].float()
         T_wr = datum["T_world_rig0"].float()
         datum["bb2d"] = bb2d
-        precision_dtype = (
-            torch.bfloat16 if args.precision == "bfloat16" else torch.float32
-        )
+        if args.force_precision is not None:
+            precision_dtype = torch.bfloat16 if args.force_precision == "bfloat16" else torch.float32
+        elif device == "cuda" and torch.cuda.is_bf16_supported():
+            precision_dtype = torch.bfloat16
+        else:
+            precision_dtype = torch.float32
         # MPS does not support torch.autocast
         if device == "mps":
             outputs = boxernet.forward(datum)
@@ -769,6 +772,11 @@ def main():
         if args.viz_headless:
             timing_str += f" viz:{t_viz:.0f}ms"
         pbar.set_postfix_str(f"{len(bb2d)} 2D, {obb_pr_w.shape[0]} 3D | " + timing_str)
+
+    if writer is not None:
+        writer.close()
+        print(f"==> Saved 3D BBs to {csv_path}")
+        print(f"==> Saved 2D BBs to {csv2d_out_path}")
 
     if args.viz_headless:
         # Calculate FPS from RGB timestamps

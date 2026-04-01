@@ -39,24 +39,23 @@ We host model checkpoints for BoxerNet, DinoV3 and OWLv2 on [HuggingFace](https:
 bash scripts/download_ckpts.sh
 ```
 
-### Download Aria Data
+## Download Sample Aria Data
 
 We host three sample [Project Aria](https://www.projectaria.com/) sequences on [HuggingFace](https://huggingface.co/datasets/facebook/boxer):
 
 ```bash
 # Download all three sequences (hohen_gen1, nym10_gen1, cook0_gen2)
 bash scripts/download_aria_data.sh
-
-# Or download a single sequence
-bash scripts/download_aria_data.sh hohen_gen1
 ```
 
-### Demo #1: Run BoxerNet in headless mode on 10 images
+## Demo #1: Run BoxerNet in headless mode
+For this first demo, you do not need to have a display. This will run BoxerNet on the first 10 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset.
+
 ```bash
 python run_boxer.py --input nym10_gen1 --max_n=10 --skip_viz
 ```
 
-### Demo #2: BoxerNet Interactive Demo on Aria Data
+## Demo #2: BoxerNet Interactive Demo on Aria Data
 This demo allows you to create 2DBB prompts and enter text to prompt OWL to detect objects. Run it like:
 ```bash
 python view_prompt.py --input nym10_gen1
@@ -66,10 +65,39 @@ You should see a window that looks like this:
 
 ![View Prompt Demo](assets/view_prompt_demo.jpg)
 
-### Demo #3: BoxerNet Interactive Demo on Aria Data
+You can also run it on the other Project Aria sequences:
+* python view_prompt.py --input hohen_gen1
+* python view_prompt.py --input cook0_gen2
 
+## Demo #3: Visualize Offline Fusion
 
-### Download Other Data
+We first run boxer on a longer subset of a sequence (200 frames).
+```bash
+python run_boxer.py --input nym10_gen1 --max_n=200 --skip_viz
+```
+This generates 2DBB and 3DBB csv files, for example:
+* output/nym10_gen1/boxer_3dbbs.csv
+* output/nym10_gen1/owl_2dbbs.csv
+
+Then, run the fusion script, which will by default search the above paths, to load and fuse the 3DBBs from above
+
+```bash
+python view_fusion.py --input nym10_gen1
+```
+
+You should see a window like this:
+
+![View Fusion Demo](assets/view_fusion_demo.jpg)
+
+## Demo #4: Online Tracker (requires demo #3)
+
+Make sure to run Demo #3 above first to generate the 2DBB and 3DBB CSVs. Run the online tracker, which will estimate 3DBBs on the fly as new images are observed:
+
+```bash
+python view_tracker.py --input nym10_gen1
+```
+
+## Download Other Data
 
 We provide helper scripts to set up additional data sources:
 
@@ -84,18 +112,7 @@ python scripts/download_ca1m_sample.py
 # then place the scene directory in sample_data/, e.g. sample_data/scene0707_00
 ```
 
-## Adding Additional Datasets
-
-For the minimal single image lifting with BoxerNet, we require
-* image
-* intrinsics calibration (we tested with both Pinhole and Fisheye624 camera models)
-* the 3D gravity direction
-* Depth is optional but improves performance significantly
-
-For lifting a video sequence we need the same as above plus:
-* full 6 DoF pose for each image
-
-## Usage
+## run_boxer.py Usage Details
 
 The pipeline supports optional **online 3D tracking** (`--track`) for temporal consistency and **offline 3D fusion** (`--fuse`) for merging detections across frames after all detections have been made.
 
@@ -127,8 +144,8 @@ python run_boxer.py --input SUNRGBD
 # Adjust thresholds
 python run_boxer.py --input hohen_gen1 --thresh2d 0.3 --thresh3d 0.6
 
-# Use bfloat16 for faster inference on supported GPUs
-python run_boxer.py --input hohen_gen1 --precision bfloat16
+# Force a specific precision (auto-detects bfloat16 on supported CUDA GPUs)
+python run_boxer.py --input hohen_gen1 --force_precision bfloat16
 ```
 
 ### Outputs
@@ -151,7 +168,7 @@ Results are written to `output/<sequence_name>/`:
 | `--track` | off | Enable online 3D box tracking |
 | `--fuse` | off | Run post-hoc 3D box fusion |
 | `--skip_viz` | off | Disable visualization (on by default) |
-| `--precision` | `float32` | Inference precision (`float32` or `bfloat16`) |
+| `--force_precision` | auto | Override inference precision (`float32` or `bfloat16`). Auto-detects bfloat16 on supported CUDA GPUs |
 | `--camera` | `rgb` | Aria camera stream (`rgb`, `slaml`, `slamr`) |
 | `--pinhole` | off | Rectify fisheye to pinhole |
 | `--detector_hw` | `960` | Resize for 2D detector |
@@ -204,6 +221,18 @@ boxer/
     └── video.py              # Video I/O utilities
 ```
 
+## Adding Additional Datasets
+
+For the minimal single image lifting with BoxerNet, we require:
+* image
+* intrinsics calibration (we tested with both Pinhole and Fisheye624 camera models)
+* the 3D gravity direction
+* Depth is optional but improves performance significantly
+
+For lifting a video sequence we need the same as above plus:
+* full 6 DoF pose for each image
+
+
 ## FAQ
 
 Q: Can I run it on an arbitrary image without any other info?
@@ -231,6 +260,21 @@ ruff check --fix .
 
 # Format code
 ruff format .
+```
+
+## Testing
+
+```bash
+pip install pytest pytest-cov
+
+# Run all tests
+bash tests/run_tests.sh
+
+# Run a single test file
+bash tests/run_tests.sh test_gravity
+
+# Run without opening the coverage report
+bash tests/run_tests.sh --no-open
 ```
 
 ## License

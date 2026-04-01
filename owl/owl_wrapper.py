@@ -203,7 +203,10 @@ class OwlWrapper(torch.nn.Module):
         self.text_prompts = text_prompts
         self.min_confidence = min_confidence
         self.nms_iou_threshold = nms_iou_threshold
-        self.use_bfloat16 = precision == "bfloat16" and device not in ("cpu", "mps")
+        if precision is not None:
+            self.use_bfloat16 = precision == "bfloat16" and device not in ("cpu", "mps")
+        else:
+            self.use_bfloat16 = device == "cuda" and torch.cuda.is_bf16_supported()
 
         # Load vision detector: nn.Module for bfloat16 (explicit casting),
         # JIT trace for float32 (no benefit from bfloat16 through JIT).

@@ -72,7 +72,7 @@ def main():
     parser = argparse.ArgumentParser(description="Interactive 2D BB prompting with BoxerNet")
     add_common_args(parser)
     parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "boxernet_hw960in2x6d768.ckpt"), help="BoxerNet checkpoint")
-    parser.add_argument("--precision", type=str, default="float32", choices=["float32", "bfloat16"])
+    parser.add_argument("--force_precision", type=str, default=None, choices=["float32", "bfloat16"])
     parser.add_argument("--force_cpu", action="store_true")
     # fmt: on
     args = parser.parse_args()
@@ -90,11 +90,16 @@ def main():
     else:
         device = "cpu"
     boxernet = BoxerNet.load_from_checkpoint(args.ckpt, device=device)
-    precision_dtype = torch.bfloat16 if args.precision == "bfloat16" else torch.float32
+    if args.force_precision is not None:
+        precision_dtype = torch.bfloat16 if args.force_precision == "bfloat16" else torch.float32
+    elif device == "cuda" and torch.cuda.is_bf16_supported():
+        precision_dtype = torch.bfloat16
+    else:
+        precision_dtype = torch.float32
 
     # Load OWLv2 open-vocabulary detector
     owl = OwlWrapper(
-        device, text_prompts=["object"], min_confidence=0.2, precision=args.precision
+        device, text_prompts=["object"], min_confidence=0.2, precision=args.force_precision
     )
 
     # Build one timed_obbs entry per actual RGB frame (not per pose timestamp).
