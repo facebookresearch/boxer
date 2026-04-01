@@ -97,7 +97,7 @@ Make sure to run Demo #3 above first to generate the 2DBB and 3DBB CSVs. Run the
 python view_tracker.py --input nym10_gen1
 ```
 
-## Download Other Data
+## Download Other Data Samples
 
 We provide helper scripts to set up additional data sources:
 
@@ -145,7 +145,7 @@ python run_boxer.py --input SUNRGBD
 python run_boxer.py --input hohen_gen1 --thresh2d 0.3 --thresh3d 0.6
 
 # Force a specific precision (auto-detects bfloat16 on supported CUDA GPUs)
-python run_boxer.py --input hohen_gen1 --force_precision bfloat16
+python run_boxer.py --input hohen_gen1 --force_precision float32
 ```
 
 ### Outputs
