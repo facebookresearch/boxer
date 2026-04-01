@@ -51,16 +51,22 @@ bash scripts/download_aria_data.sh
 bash scripts/download_aria_data.sh hohen_gen1
 ```
 
-### Confirm BoxerNet runs in headless mode on the first 10 images
+### Demo #1: Run BoxerNet in headless mode on 10 images
 ```bash
-python run_boxer.py --input hohen_gen1 --max_n=10 --skip_viz
+python run_boxer.py --input nym10_gen1 --max_n=10 --skip_viz
 ```
 
-### BoxerNet Interactive Demo on Aria Data
+### Demo #2: BoxerNet Interactive Demo on Aria Data
 This demo allows you to create 2DBB prompts and enter text to prompt OWL to detect objects. Run it like:
 ```bash
-python view_prompt.py --input hohen_gen1
+python view_prompt.py --input nym10_gen1
 ```
+
+You should see a window that looks like this:
+
+![View Prompt Demo](assets/view_prompt_demo.jpg)
+
+### Demo #3: BoxerNet Interactive Demo on Aria Data
 
 
 ### Download Other Data
