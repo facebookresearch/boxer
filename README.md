@@ -5,12 +5,11 @@ This repo contains the code and pre-trained model needed to run Boxer on a varie
 
 ![Boxer System Architecture](assets/boxer_system.jpg)
 
-In this repo, we provide examples for running on a variety of sample data sources:
-* Project Aria (Gen 1)
-* Project Aria (Gen 2)
+In this repo, we provide sample code for running on the following data sources:
+* Project Aria Gen 1 & 2
 * CA-1M
-* ScanNet
-* SUN-RGBD (single view)
+* SUN-RGBD
+* ScanNet (manual download needed)
 
 
 ## Installation
@@ -211,6 +210,23 @@ Q: Does it work on a Windows machine?
 A: We did not test it, but running the core model should work.
 
 
+## Linting
+
+We use [ruff](https://docs.astral.sh/ruff/) for linting and formatting:
+
+```bash
+pip install ruff
+
+# Check for lint errors
+ruff check .
+
+# Auto-fix lint errors
+ruff check --fix .
+
+# Format code
+ruff format .
+```
+
 ## License
 
-See the [LICENSE](LICENSE) file for details.
+The majority of Boxer is licensed under CC-BY-NC. See the [LICENSE](LICENSE) file for details. However portions of the project are available under separate license terms: see [NOTICE](NOTICE).

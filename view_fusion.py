@@ -1,5 +1,9 @@
 #! /usr/bin/env python3
 
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 """View pre-computed BoxerNet 3D bounding boxes in a minimal 3D viewer."""
 
@@ -7,7 +11,12 @@ import argparse
 import os
 
 import torch
-from utils.viewer_3d import launch_viewer, resolve_input, subsample_timed_obbs, OBBViewer
+from utils.viewer_3d import (
+    launch_viewer,
+    resolve_input,
+    subsample_timed_obbs,
+    OBBViewer,
+)
 from utils.viewer_3d import scale_factor
 from utils.file_io import read_obb_csv
 from utils.demo_utils import EVAL_PATH

@@ -1,5 +1,9 @@
 #! /usr/bin/env python3
 
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 import argparse
 import os
@@ -56,17 +60,28 @@ def jet_colors_bgr(scores):
 
 
 TAB20 = [
-    (0.122, 0.467, 0.706), (0.682, 0.780, 0.910),
-    (1.000, 0.498, 0.055), (1.000, 0.733, 0.471),
-    (0.173, 0.627, 0.173), (0.596, 0.875, 0.541),
-    (0.839, 0.153, 0.157), (1.000, 0.596, 0.588),
-    (0.580, 0.404, 0.741), (0.773, 0.690, 0.835),
-    (0.549, 0.337, 0.294), (0.769, 0.612, 0.580),
-    (0.890, 0.467, 0.761), (0.969, 0.714, 0.824),
-    (0.498, 0.498, 0.498), (0.780, 0.780, 0.780),
-    (0.737, 0.741, 0.133), (0.859, 0.859, 0.553),
-    (0.090, 0.745, 0.812), (0.620, 0.855, 0.898),
+    (0.122, 0.467, 0.706),
+    (0.682, 0.780, 0.910),
+    (1.000, 0.498, 0.055),
+    (1.000, 0.733, 0.471),
+    (0.173, 0.627, 0.173),
+    (0.596, 0.875, 0.541),
+    (0.839, 0.153, 0.157),
+    (1.000, 0.596, 0.588),
+    (0.580, 0.404, 0.741),
+    (0.773, 0.690, 0.835),
+    (0.549, 0.337, 0.294),
+    (0.769, 0.612, 0.580),
+    (0.890, 0.467, 0.761),
+    (0.969, 0.714, 0.824),
+    (0.498, 0.498, 0.498),
+    (0.780, 0.780, 0.780),
+    (0.737, 0.741, 0.133),
+    (0.859, 0.859, 0.553),
+    (0.090, 0.745, 0.812),
+    (0.620, 0.855, 0.898),
 ]
+
 
 def comma_separated_list(value):
     # Handle empty string gracefully
@@ -121,7 +136,10 @@ def main():
         if not DEBUG:
             return
         now = time.perf_counter()
-        print(f"  [init] {label}: {(now - _t_prev)*1000:.0f}ms (total: {(now - _t_start)*1000:.0f}ms)", flush=True)
+        print(
+            f"  [init] {label}: {(now - _t_prev) * 1000:.0f}ms (total: {(now - _t_start) * 1000:.0f}ms)",
+            flush=True,
+        )
         _t_prev = now
 
     # Determine dataset type and seq_name from input string
@@ -161,24 +179,31 @@ def main():
         print(f"==> Loading cached 3D BBs from {csv_path}")
         cached_timed_obbs = read_obb_csv(csv_path)
         total_dets = sum(len(obbs) for obbs in cached_timed_obbs.values())
-        print(f"==> Loaded {len(cached_timed_obbs)} frames, {total_dets} detections from cache")
+        print(
+            f"==> Loaded {len(cached_timed_obbs)} frames, {total_dets} detections from cache"
+        )
 
         if args.fuse:
             from utils.fuse_3d_boxes import fuse_obbs_from_csv
+
             print(f"\n==> Running fusion on {csv_path}")
             fuse_obbs_from_csv(csv_path)
 
         if os.path.exists(csv2d_out_path):
             print(f"==> 2D BB CSV exists: {csv2d_out_path}")
         else:
-            print(f"==> No 2D BB CSV found (run without --cache3d to generate: {csv2d_out_path})")
+            print(
+                f"==> No 2D BB CSV found (run without --cache3d to generate: {csv2d_out_path})"
+            )
         return
 
     # Create data loader
     if dataset_type == "scannet":
         loader = ScanNetLoader(
             scene_dir=args.input,
-            annotation_path=os.path.join(SAMPLE_DATA_PATH, "scannet", "full_annotations.json"),
+            annotation_path=os.path.join(
+                SAMPLE_DATA_PATH, "scannet", "full_annotations.json"
+            ),
             skip_frames=args.skip_n,
             max_frames=args.max_n,
             start_frame=args.start_n,
@@ -263,8 +288,11 @@ def main():
         method = "GT2D"
     else:
         from owl.owl_wrapper import OwlWrapper
+
         owl = OwlWrapper(
-            device, text_prompts=text_labels, min_confidence=args.thresh2d,
+            device,
+            text_prompts=text_labels,
+            min_confidence=args.thresh2d,
             precision=args.precision,
         )
         method = "OWLv2"
@@ -301,7 +329,11 @@ def main():
         )
 
     colors = {
-        label: (np.random.randint(100, 255), np.random.randint(100, 255), np.random.randint(100, 255))
+        label: (
+            np.random.randint(100, 255),
+            np.random.randint(100, 255),
+            np.random.randint(100, 255),
+        )
         for label in text_labels
     }
 
@@ -317,6 +349,7 @@ def main():
     tracker = None
     if args.track:
         from utils.track_3d_boxes import BoundingBox3DTracker
+
         tracker = BoundingBox3DTracker(
             iou_threshold=0.25,
             min_hits=8,
@@ -376,7 +409,10 @@ def main():
 
         if DEBUG_VIZ:
             _tl2 = time.perf_counter()
-            print(f"  [load] next(loader): {(_tl1-_tl0)*1000:.1f}ms  torch2cv2: {(_tl2-_tl1)*1000:.1f}ms", flush=True)
+            print(
+                f"  [load] next(loader): {(_tl1 - _tl0) * 1000:.1f}ms  torch2cv2: {(_tl2 - _tl1) * 1000:.1f}ms",
+                flush=True,
+            )
 
         sdp_w_viz = datum["sdp_w"].float()  # Keep original SDP for visualization
         if args.no_sdp:
@@ -548,14 +584,18 @@ def main():
             timer.start("viz")
             _t0 = time.perf_counter()
 
-            bb2_texts = [f"{l[:10]} (conf2d={s:.2f})" for s, l in zip(scores2d, labels2d)]
+            bb2_texts = [
+                f"{l[:10]} (conf2d={s:.2f})" for s, l in zip(scores2d, labels2d)
+            ]
             bb2_colors = jet_colors_bgr(scores2d)
-            bb3_texts = [f"{l[:10]} (conf3d={s:.2f})" for s, l in zip(scores3d, labels3d)]
+            bb3_texts = [
+                f"{l[:10]} (conf3d={s:.2f})" for s, l in zip(scores3d, labels3d)
+            ]
             bb3_colors = jet_colors_bgr(scores3d)
 
             if DEBUG_VIZ:
                 _t1 = time.perf_counter()
-                print(f"  [viz] colors: {(_t1-_t0)*1000:.1f}ms", flush=True)
+                print(f"  [viz] colors: {(_t1 - _t0) * 1000:.1f}ms", flush=True)
 
             viz_2d = img_np.copy()
 
@@ -566,8 +606,13 @@ def main():
                 texts=bb2_texts,
                 clr=bb2_colors,
             )
-            put_text(viz_2d, f"2D Detections ({method} {args.detector_hw}x{args.detector_hw})", scale=0.6, line=0)
-            t_sec = int(datum['time_ns0']) / 1e9
+            put_text(
+                viz_2d,
+                f"2D Detections ({method} {args.detector_hw}x{args.detector_hw})",
+                scale=0.6,
+                line=0,
+            )
+            t_sec = int(datum["time_ns0"]) / 1e9
             put_text(viz_2d, f"frame {ii}, t={t_sec:.3f}s", scale=0.5, line=2)
             max_labels = 64
             if len(text_labels) > max_labels:
@@ -575,15 +620,22 @@ def main():
             else:
                 line = -1 - len(text_labels)
                 for jj, label in enumerate(text_labels[:max_labels]):
-                    put_text(viz_2d, label, scale=0.4, line=-1 - jj, color=colors[label])
+                    put_text(
+                        viz_2d, label, scale=0.4, line=-1 - jj, color=colors[label]
+                    )
             if args.gt2d:
                 put_text(viz_2d, f"{len(bb2d)} 2DBB PROMPTS", scale=0.4, line=line)
             else:
-                put_text(viz_2d, f"{len(text_labels)} TEXT PROMPTS ({taxonomy_name})", scale=0.4, line=line)
+                put_text(
+                    viz_2d,
+                    f"{len(text_labels)} TEXT PROMPTS ({taxonomy_name})",
+                    scale=0.4,
+                    line=line,
+                )
 
             if DEBUG_VIZ:
                 _t2 = time.perf_counter()
-                print(f"  [viz] 2d_panel: {(_t2-_t1)*1000:.1f}ms", flush=True)
+                print(f"  [viz] 2d_panel: {(_t2 - _t1) * 1000:.1f}ms", flush=True)
 
             # 3D BB Viz on image.
             viz_3d = img_np.copy()
@@ -596,7 +648,9 @@ def main():
                 if DEBUG_VIZ:
                     _ts1 = time.perf_counter()
                 HH, WW = viz_3d.shape[:2]
-                viz_sdp, sdp_resized = render_depth_patches(sdp_median, rotated=rotated, HH=HH, WW=WW)
+                viz_sdp, sdp_resized = render_depth_patches(
+                    sdp_median, rotated=rotated, HH=HH, WW=WW
+                )
                 if DEBUG_VIZ:
                     _ts2 = time.perf_counter()
                 viz_sdp = np.ascontiguousarray(viz_sdp)
@@ -607,16 +661,25 @@ def main():
                     # Single-pass fused blend+mask: 0.2 ≈ 51/256, 0.8 ≈ 205/256
                     viz_3d = np.where(
                         mask3,
-                        ((viz_sdp.astype(np.uint16) * 51 + viz_3d.astype(np.uint16) * 205) >> 8).astype(np.uint8),
+                        (
+                            (
+                                viz_sdp.astype(np.uint16) * 51
+                                + viz_3d.astype(np.uint16) * 205
+                            )
+                            >> 8
+                        ).astype(np.uint8),
                         viz_3d,
                     )
                 if DEBUG_VIZ:
                     _ts4 = time.perf_counter()
-                    print(f"    [sdp] cpu: {(_ts1-_ts0)*1000:.1f}ms  render: {(_ts2-_ts1)*1000:.1f}ms  mask: {(_ts3-_ts2)*1000:.1f}ms  blend: {(_ts4-_ts3)*1000:.1f}ms", flush=True)
+                    print(
+                        f"    [sdp] cpu: {(_ts1 - _ts0) * 1000:.1f}ms  render: {(_ts2 - _ts1) * 1000:.1f}ms  mask: {(_ts3 - _ts2) * 1000:.1f}ms  blend: {(_ts4 - _ts3) * 1000:.1f}ms",
+                        flush=True,
+                    )
 
             if DEBUG_VIZ:
                 _t3 = time.perf_counter()
-                print(f"  [viz] sdp: {(_t3-_t2)*1000:.1f}ms", flush=True)
+                print(f"  [viz] sdp: {(_t3 - _t2) * 1000:.1f}ms", flush=True)
 
             viz_3d = draw_bb3s(
                 viz=viz_3d,
@@ -628,14 +691,22 @@ def main():
                 colors=bb3_colors,
                 texts=bb3_texts,
             )
-            put_text(viz_3d, f"3D Detections (Boxer {boxernet.hw}x{boxernet.hw})", scale=0.6, line=0)
-            put_text(viz_3d, f"Device: '{loader.device_name}', Camera: '{loader.camera}'", scale=0.5,
+            put_text(
+                viz_3d,
+                f"3D Detections (Boxer {boxernet.hw}x{boxernet.hw})",
+                scale=0.6,
+                line=0,
+            )
+            put_text(
+                viz_3d,
+                f"Device: '{loader.device_name}', Camera: '{loader.camera}'",
+                scale=0.5,
                 line=-1,
             )
 
             if DEBUG_VIZ:
                 _t4 = time.perf_counter()
-                print(f"  [viz] draw_bb3s: {(_t4-_t3)*1000:.1f}ms", flush=True)
+                print(f"  [viz] draw_bb3s: {(_t4 - _t3) * 1000:.1f}ms", flush=True)
 
             panels = [viz_2d, viz_3d]
 
@@ -661,14 +732,19 @@ def main():
                         colors=track_colors,
                         texts=track_texts,
                     )
-                put_text(viz_track, f"3D Tracks: {len(active_tracks)} Objects", scale=0.6, line=0)
+                put_text(
+                    viz_track,
+                    f"3D Tracks: {len(active_tracks)} Objects",
+                    scale=0.6,
+                    line=0,
+                )
                 panels.append(viz_track)
 
             final = np.hstack(panels)
 
             if DEBUG_VIZ:
                 _t5 = time.perf_counter()
-                print(f"  [viz] panels+hstack: {(_t5-_t4)*1000:.1f}ms", flush=True)
+                print(f"  [viz] panels+hstack: {(_t5 - _t4) * 1000:.1f}ms", flush=True)
 
             _, jpg_buf = cv2.imencode(".jpg", final, [cv2.IMWRITE_JPEG_QUALITY, 85])
             jpg_bytes = jpg_buf.tobytes()
@@ -681,8 +757,8 @@ def main():
 
             if DEBUG_VIZ:
                 _t6 = time.perf_counter()
-                print(f"  [viz] imwrite: {(_t6-_t5)*1000:.1f}ms", flush=True)
-                print(f"  [viz] TOTAL: {(_t6-_t0)*1000:.1f}ms", flush=True)
+                print(f"  [viz] imwrite: {(_t6 - _t5) * 1000:.1f}ms", flush=True)
+                print(f"  [viz] TOTAL: {(_t6 - _t0) * 1000:.1f}ms", flush=True)
 
             t_viz = timer.stop("viz")
 
@@ -718,6 +794,7 @@ def main():
 
     if args.fuse:
         from utils.fuse_3d_boxes import fuse_obbs_from_csv
+
         print(f"\n==> Running fusion on {csv_path}")
         fuse_obbs_from_csv(csv_path)
 

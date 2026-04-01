@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-ignore-all-errors
 import glob
 import json
@@ -106,9 +110,7 @@ class CALoader(BaseLoader):
 
         # Discover frame timestamps from .wide directories.
         wide_dirs = glob.glob(os.path.join(data_dir, "*.wide"))
-        image_tags = sorted(
-            {os.path.basename(d).split(".")[0] for d in wide_dirs}
-        )
+        image_tags = sorted({os.path.basename(d).split(".")[0] for d in wide_dirs})
         image_tags = image_tags[start_frame:]
         image_tags = image_tags[::skip_frames]
         image_tags = image_tags[:max_frames]
@@ -129,8 +131,7 @@ class CALoader(BaseLoader):
 
         # Find semantic IDs for floor and wall classes to filter out
         self.structure_sem_ids = (
-            self.find_structure_sem_ids(self.sem_id_to_name)
-            if remove_structure else []
+            self.find_structure_sem_ids(self.sem_id_to_name) if remove_structure else []
         )
 
         # Timestamps derived from image tags (always available without loading images).
@@ -233,13 +234,21 @@ class CALoader(BaseLoader):
             img_path = os.path.join(data_dir, tag + ".wide", "image.png")
             with Image.open(img_path) as im:
                 W, H = im.size
-            depth_resize = cv2.resize(depth_raw, (W, H), interpolation=cv2.INTER_NEAREST)
+            depth_resize = cv2.resize(
+                depth_raw, (W, H), interpolation=cv2.INTER_NEAREST
+            )
             depth_m = depth_resize.astype(np.float32) / 1000.0
             R_wc = RT[:3, :3].numpy().astype(np.float32)
             t_wc = RT[:3, 3].numpy().astype(np.float32)
             sdp_w = self.sdp_from_depth(
-                depth_m, K[0, 0].item(), K[1, 1].item(),
-                K[0, 2].item(), K[1, 2].item(), R_wc, t_wc, self.num_samples
+                depth_m,
+                K[0, 0].item(),
+                K[1, 1].item(),
+                K[0, 2].item(),
+                K[1, 2].item(),
+                R_wc,
+                t_wc,
+                self.num_samples,
             )
             if len(sdp_w) > 0:
                 sdp_chunks.append(sdp_w)
@@ -247,7 +256,9 @@ class CALoader(BaseLoader):
             self.sdp_global = torch.cat(sdp_chunks, dim=0)
         else:
             self.sdp_global = torch.zeros(0, 3)
-        print(f"Built global SDP: {len(self.sdp_global)} points from {len(sdp_chunks)} frames")
+        print(
+            f"Built global SDP: {len(self.sdp_global)} points from {len(sdp_chunks)} frames"
+        )
 
     def _load_frame(self, image_tag):
         """Load all data for a single frame from disk."""
@@ -267,13 +278,9 @@ class CALoader(BaseLoader):
 
         # Load camera intrinsics.
         K = torch.tensor(
-            _read_json(
-                os.path.join(data_dir, image_tag + ".wide", "image", "K.json")
-            )
+            _read_json(os.path.join(data_dir, image_tag + ".wide", "image", "K.json"))
         )
-        params = torch.tensor(
-            [K[0, 0], K[1, 1], K[0, 2], K[1, 2]], dtype=torch.float32
-        )
+        params = torch.tensor([K[0, 0], K[1, 1], K[0, 2], K[1, 2]], dtype=torch.float32)
         cam = CameraTW.from_surreal(
             width=W, height=H, type_str="pinhole", params=params
         )
@@ -287,14 +294,18 @@ class CALoader(BaseLoader):
         R_wc = RT[:3, :3].numpy().astype(np.float32)
         t_wc = RT[:3, 3].numpy().astype(np.float32)
         sdp_w = self.sdp_from_depth(
-            depth_m, params[0].item(), params[1].item(),
-            params[2].item(), params[3].item(), R_wc, t_wc, self.num_samples
+            depth_m,
+            params[0].item(),
+            params[1].item(),
+            params[2].item(),
+            params[3].item(),
+            R_wc,
+            t_wc,
+            self.num_samples,
         )
 
         # Load per-frame 3D bounding boxes.
-        bb3 = _read_json(
-            os.path.join(data_dir, image_tag + ".wide", "instances.json")
-        )
+        bb3 = _read_json(os.path.join(data_dir, image_tag + ".wide", "instances.json"))
         visible_obbs = []
         for bb in bb3:
             id_ = bb["id"]
@@ -380,4 +391,3 @@ class CALoader(BaseLoader):
             datum["bb2d0"] = bb2d
 
         return datum
-

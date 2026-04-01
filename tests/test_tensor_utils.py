@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Tests for utils/tensor_utils.py — string/tensor conversions and array utilities."""
 
 import numpy as np
@@ -118,7 +122,9 @@ class TestString2Tensor:
 
     def test_batch_tensor2string(self):
         strings = ["hello", "world"]
-        tensors = torch.stack([string2tensor(pad_string(s, max_len=10, silent=True)) for s in strings])
+        tensors = torch.stack(
+            [string2tensor(pad_string(s, max_len=10, silent=True)) for s in strings]
+        )
         results = tensor2string(tensors, unpad=True)
         assert results == strings
 

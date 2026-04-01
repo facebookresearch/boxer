@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Tests for OBB CSV read/write round-trips in file_io.py."""
 
 import os
@@ -12,8 +16,9 @@ from utils.file_io import ObbCsvWriter2, read_obb_csv, save_bb2d_csv, load_bb2d_
 from utils.tw.tensor_utils import pad_string, string2tensor, tensor2string, unpad_string
 
 
-def _make_test_obb(position, sz=(1.0, 1.0, 1.0), yaw=0.0, prob=0.9,
-                   text="chair", sem_id=5, inst_id=-1):
+def _make_test_obb(
+    position, sz=(1.0, 1.0, 1.0), yaw=0.0, prob=0.9, text="chair", sem_id=5, inst_id=-1
+):
     """Create an ObbTW with text and semantic label set."""
     obb = make_obb(sz=list(sz), position=list(position), prob=prob, yaw=yaw)
     text_tensor = string2tensor(pad_string(text, max_len=128))
@@ -37,7 +42,9 @@ class TestObbCsvRoundTrip(unittest.TestCase):
 
     def test_single_obb_roundtrip(self):
         """Write one OBB and read it back, verify fields match."""
-        obb = _make_test_obb([1.0, 2.0, 3.0], sz=(0.5, 1.0, 1.5), prob=0.85, text="table")
+        obb = _make_test_obb(
+            [1.0, 2.0, 3.0], sz=(0.5, 1.0, 1.5), prob=0.85, text="table"
+        )
         obbs = torch.stack([obb])
 
         writer = ObbCsvWriter2(self.csv_path)
@@ -84,10 +91,12 @@ class TestObbCsvRoundTrip(unittest.TestCase):
         writer = ObbCsvWriter2(self.csv_path)
 
         obb1 = torch.stack([_make_test_obb([0.0, 0.0, 0.5], text="chair")])
-        obb2 = torch.stack([
-            _make_test_obb([1.0, 0.0, 0.5], text="table"),
-            _make_test_obb([2.0, 0.0, 0.5], text="lamp"),
-        ])
+        obb2 = torch.stack(
+            [
+                _make_test_obb([1.0, 0.0, 0.5], text="table"),
+                _make_test_obb([2.0, 0.0, 0.5], text="lamp"),
+            ]
+        )
         writer.write(obb1, timestamps_ns=100)
         writer.write(obb2, timestamps_ns=200)
         writer.close()
@@ -100,6 +109,7 @@ class TestObbCsvRoundTrip(unittest.TestCase):
     def test_rotation_roundtrip(self):
         """Verify rotation (quaternion) survives the CSV round-trip."""
         import math
+
         yaw = math.pi / 3
         obb = _make_test_obb([1.0, 2.0, 0.5], yaw=yaw, text="sofa")
         stacked = torch.stack([obb])
@@ -119,7 +129,10 @@ class TestObbCsvRoundTrip(unittest.TestCase):
     def test_text_label_roundtrip(self):
         """Verify text labels survive the CSV round-trip."""
         labels = ["dining chair", "coffee table", "floor lamp"]
-        obbs = [_make_test_obb([i * 3.0, 0.0, 0.5], text=label) for i, label in enumerate(labels)]
+        obbs = [
+            _make_test_obb([i * 3.0, 0.0, 0.5], text=label)
+            for i, label in enumerate(labels)
+        ]
         stacked = torch.stack(obbs)
 
         writer = ObbCsvWriter2(self.csv_path)
@@ -232,8 +245,15 @@ class TestBb2dCsvRoundTrip(unittest.TestCase):
         labels = ["chair", "table"]
 
         save_bb2d_csv(
-            self.csv_path, frame_id=0, bb2d=bb2d, scores=scores, labels=labels,
-            append=False, time_ns=1000, img_width=640, img_height=480,
+            self.csv_path,
+            frame_id=0,
+            bb2d=bb2d,
+            scores=scores,
+            labels=labels,
+            append=False,
+            time_ns=1000,
+            img_width=640,
+            img_height=480,
         )
 
         groups = load_bb2d_csv(self.csv_path)
@@ -252,8 +272,13 @@ class TestBb2dCsvRoundTrip(unittest.TestCase):
         labels = ["lamp"]
 
         save_bb2d_csv(
-            self.csv_path, frame_id=0, bb2d=bb2d, scores=scores, labels=labels,
-            append=False, time_ns=500,
+            self.csv_path,
+            frame_id=0,
+            bb2d=bb2d,
+            scores=scores,
+            labels=labels,
+            append=False,
+            time_ns=500,
         )
 
         groups = load_bb2d_csv(self.csv_path)
@@ -265,10 +290,24 @@ class TestBb2dCsvRoundTrip(unittest.TestCase):
         bb1 = np.array([[10.0, 20.0, 30.0, 40.0]])
         bb2 = np.array([[50.0, 60.0, 70.0, 80.0]])
 
-        save_bb2d_csv(self.csv_path, frame_id=0, bb2d=bb1, scores=[0.9],
-                       labels=["a"], append=False, time_ns=100)
-        save_bb2d_csv(self.csv_path, frame_id=1, bb2d=bb2, scores=[0.8],
-                       labels=["b"], append=True, time_ns=200)
+        save_bb2d_csv(
+            self.csv_path,
+            frame_id=0,
+            bb2d=bb1,
+            scores=[0.9],
+            labels=["a"],
+            append=False,
+            time_ns=100,
+        )
+        save_bb2d_csv(
+            self.csv_path,
+            frame_id=1,
+            bb2d=bb2,
+            scores=[0.8],
+            labels=["b"],
+            append=True,
+            time_ns=200,
+        )
 
         groups = load_bb2d_csv(self.csv_path)
         self.assertEqual(len(groups), 2)

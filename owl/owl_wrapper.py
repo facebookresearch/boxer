@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 import io
 import os
@@ -57,7 +61,9 @@ class VisionDetectorWrapper(torch.nn.Module):
         image_embeds = self.post_layernorm(last_hidden_state)
 
         # Merge CLS token with patch tokens
-        class_token_out = torch.broadcast_to(image_embeds[:, :1, :], image_embeds[:, :-1].shape)
+        class_token_out = torch.broadcast_to(
+            image_embeds[:, :1, :], image_embeds[:, :-1].shape
+        )
         image_embeds = image_embeds[:, 1:, :] * class_token_out
         image_embeds = self.layer_norm(image_embeds)
 
@@ -69,7 +75,9 @@ class VisionDetectorWrapper(torch.nn.Module):
         query_mask_batched = query_mask.unsqueeze(0)
 
         # Class prediction
-        pred_logits, _ = self.class_head(image_feats, query_embeds_batched, query_mask_batched)
+        pred_logits, _ = self.class_head(
+            image_feats, query_embeds_batched, query_mask_batched
+        )
 
         # Box prediction
         pred_boxes = self.box_head(image_feats)
@@ -78,7 +86,12 @@ class VisionDetectorWrapper(torch.nn.Module):
 
         return pred_logits, pred_boxes
 
-_CKPT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ckpts", "owlv2-base-patch16-ensemble.pt")
+
+_CKPT_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "ckpts",
+    "owlv2-base-patch16-ensemble.pt",
+)
 
 
 def _per_class_nms(boxes, scores, labels, iou_threshold):
@@ -100,15 +113,19 @@ def _per_class_nms(boxes, scores, labels, iou_threshold):
                 continue
             keep.append(cls_idx[i].item())
             # IoU of box i with all subsequent boxes
-            ix1 = torch.max(cls_boxes[i, 0], cls_boxes[i + 1:, 0])
-            iy1 = torch.max(cls_boxes[i, 1], cls_boxes[i + 1:, 1])
-            ix2 = torch.min(cls_boxes[i, 2], cls_boxes[i + 1:, 2])
-            iy2 = torch.min(cls_boxes[i, 3], cls_boxes[i + 1:, 3])
+            ix1 = torch.max(cls_boxes[i, 0], cls_boxes[i + 1 :, 0])
+            iy1 = torch.max(cls_boxes[i, 1], cls_boxes[i + 1 :, 1])
+            ix2 = torch.min(cls_boxes[i, 2], cls_boxes[i + 1 :, 2])
+            iy2 = torch.min(cls_boxes[i, 3], cls_boxes[i + 1 :, 3])
             inter = (ix2 - ix1).clamp(min=0) * (iy2 - iy1).clamp(min=0)
-            area_i = (cls_boxes[i, 2] - cls_boxes[i, 0]) * (cls_boxes[i, 3] - cls_boxes[i, 1])
-            area_j = (cls_boxes[i + 1:, 2] - cls_boxes[i + 1:, 0]) * (cls_boxes[i + 1:, 3] - cls_boxes[i + 1:, 1])
+            area_i = (cls_boxes[i, 2] - cls_boxes[i, 0]) * (
+                cls_boxes[i, 3] - cls_boxes[i, 1]
+            )
+            area_j = (cls_boxes[i + 1 :, 2] - cls_boxes[i + 1 :, 0]) * (
+                cls_boxes[i + 1 :, 3] - cls_boxes[i + 1 :, 1]
+            )
             iou = inter / (area_i + area_j - inter + 1e-6)
-            suppressed[i + 1:] |= iou > iou_threshold
+            suppressed[i + 1 :] |= iou > iou_threshold
     keep.sort()
     return keep
 
@@ -126,7 +143,15 @@ class OwlWrapper(torch.nn.Module):
     Use set_text_prompts() to change prompts without re-creating the wrapper.
     """
 
-    def __init__(self, device="cuda", text_prompts=None, min_confidence=0.2, precision="float32", warmup=True, nms_iou_threshold=0.5):
+    def __init__(
+        self,
+        device="cuda",
+        text_prompts=None,
+        min_confidence=0.2,
+        precision="float32",
+        warmup=True,
+        nms_iou_threshold=0.5,
+    ):
         super().__init__()
         _debug = os.environ.get("DEBUG", "0") == "1"
         _t0 = time.perf_counter()
@@ -137,7 +162,10 @@ class OwlWrapper(torch.nn.Module):
             if not _debug:
                 return
             now = time.perf_counter()
-            print(f"  [owl] {label}: {(now - _tp)*1000:.0f}ms (total: {(now - _t0)*1000:.0f}ms)", flush=True)
+            print(
+                f"  [owl] {label}: {(now - _tp) * 1000:.0f}ms (total: {(now - _t0) * 1000:.0f}ms)",
+                flush=True,
+            )
             _tp = now
 
         if text_prompts is None:
@@ -165,7 +193,9 @@ class OwlWrapper(torch.nn.Module):
         self.native_size = tuple(config["image_size"])  # (960, 960)
 
         # Load traced text encoder (always on CPU, runs once at init)
-        self.text_encoder = torch.jit.load(io.BytesIO(checkpoint["text_encoder"]), map_location="cpu")
+        self.text_encoder = torch.jit.load(
+            io.BytesIO(checkpoint["text_encoder"]), map_location="cpu"
+        )
         self.text_encoder.eval()
         _dbg("jit text_encoder")
 
@@ -173,7 +203,7 @@ class OwlWrapper(torch.nn.Module):
         self.text_prompts = text_prompts
         self.min_confidence = min_confidence
         self.nms_iou_threshold = nms_iou_threshold
-        self.use_bfloat16 = (precision == "bfloat16" and device not in ("cpu", "mps"))
+        self.use_bfloat16 = precision == "bfloat16" and device not in ("cpu", "mps")
 
         # Load vision detector: nn.Module for bfloat16 (explicit casting),
         # JIT trace for float32 (no benefit from bfloat16 through JIT).
@@ -205,6 +235,7 @@ class OwlWrapper(torch.nn.Module):
 
         # Pre-compute and cache text embeddings (cached to disk by prompt hash)
         import hashlib
+
         prompt_hash = hashlib.md5("\n".join(text_prompts).encode()).hexdigest()[:12]
         cache_path = _CKPT_PATH.replace(".pt", f"_textemb_{prompt_hash}.pt")
         if os.path.exists(cache_path):
@@ -219,12 +250,17 @@ class OwlWrapper(torch.nn.Module):
             _dbg(f"load cached text embeddings ({len(text_prompts)} prompts)")
         else:
             self.text_embeddings = self._encode_text(text_prompts)
-            torch.save({"prompts": text_prompts, "embeddings": self.text_embeddings.cpu()}, cache_path)
+            torch.save(
+                {"prompts": text_prompts, "embeddings": self.text_embeddings.cpu()},
+                cache_path,
+            )
             self.text_embeddings = self.text_embeddings.to(device)
             _dbg(f"encode_text ({len(text_prompts)} prompts) + save cache")
         self.query_mask = torch.ones(len(text_prompts), dtype=torch.bool, device=device)
 
-        print(f"Loaded OWLv2 on {device} with {len(text_prompts)} text prompts, precision={'bfloat16' if self.use_bfloat16 else 'float32'}")
+        print(
+            f"Loaded OWLv2 on {device} with {len(text_prompts)} text prompts, precision={'bfloat16' if self.use_bfloat16 else 'float32'}"
+        )
 
         # Warmup
         if warmup:
@@ -278,7 +314,10 @@ class OwlWrapper(torch.nn.Module):
         # Preprocess: resize to native model resolution, normalize
         interp_mode = "bilinear" if self.device == "mps" else "bicubic"
         pixel_values = F.interpolate(
-            input_image, size=self.native_size, mode=interp_mode, align_corners=False,
+            input_image,
+            size=self.native_size,
+            mode=interp_mode,
+            align_corners=False,
         )
         pixel_values = pixel_values / 255.0
         mean = self.image_mean.to(pixel_values.device)
@@ -290,7 +329,9 @@ class OwlWrapper(torch.nn.Module):
 
         # Forward pass (vision + detection)
         logits, pred_boxes = self.vision_detector(
-            pixel_values, self.text_embeddings, self.query_mask,
+            pixel_values,
+            self.text_embeddings,
+            self.query_mask,
         )
 
         # Postprocess in float32 for numerical stability

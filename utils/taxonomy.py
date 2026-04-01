@@ -1,11 +1,18 @@
 #! /usr/bin/env python3
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-ignore-all-errors
 
 import os
 from typing import List, Union
 
 # Directory containing label files (owl/ directory, sibling of utils/)
-_LABELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "owl")
+_LABELS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "owl"
+)
 
 
 def load_text_labels(
@@ -42,7 +49,6 @@ def load_text_labels(
         )
 
     return labels
-
 
 
 BOXY_SEM2NAME = {
@@ -198,4 +204,3 @@ TEXT2COLORS = {
     "anything": (0.55, 0.9, 0.55),
     "ceiling": (0.5, 1.0, 0.5),  # green
 }
-

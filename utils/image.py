@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 from typing import Optional, Tuple, Union
 
@@ -215,11 +219,13 @@ def draw_bb3_lines(
             if (c == -1).all():
                 obb_colors.append((255, 255, 255))
             else:
-                obb_colors.append((
-                    int(round(float(c[2] * 255))),
-                    int(round(float(c[1] * 255))),
-                    int(round(float(c[0] * 255))),
-                ))
+                obb_colors.append(
+                    (
+                        int(round(float(c[2] * 255))),
+                        int(round(float(c[1] * 255))),
+                        int(round(float(c[0] * 255))),
+                    )
+                )
 
     # Convert to numpy for fast indexing
     pt2s_np = pt2s.cpu().numpy()
@@ -311,7 +317,11 @@ def draw_bb3s(
                         else:
                             text = unpad_string(tensor2string(obbs.text[idx].byte()))
                     text_clr = colors[idx] if colors is not None else (200, 200, 200)
-                    score = float(obbs.prob.squeeze(-1)[idx]) if draw_score and obbs.prob is not None else None
+                    score = (
+                        float(obbs.prob.squeeze(-1)[idx])
+                        if draw_score and obbs.prob is not None
+                        else None
+                    )
                     label_items.append((center, text, text_clr, score))
 
         if label_items:
@@ -330,8 +340,11 @@ def draw_bb3s(
                         text, cv2.FONT_HERSHEY_DUPLEX, text_sz, 1
                     )
                     put_text(
-                        viz, f"prob={score:.2f}", scale=text_sz,
-                        font_pt=(x, y + int(txt_h + 0.5)), color=text_clr,
+                        viz,
+                        f"prob={score:.2f}",
+                        scale=text_sz,
+                        font_pt=(x, y + int(txt_h + 0.5)),
+                        color=text_clr,
                     )
 
             if rotate_label:

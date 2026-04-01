@@ -1,5 +1,9 @@
 #! /usr/bin/env python3
 
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 """Interactive 2D bounding box prompting with BoxerNet 3D visualization.
 
@@ -86,13 +90,12 @@ def main():
     else:
         device = "cpu"
     boxernet = BoxerNet.load_from_checkpoint(args.ckpt, device=device)
-    precision_dtype = (
-        torch.bfloat16 if args.precision == "bfloat16" else torch.float32
-    )
+    precision_dtype = torch.bfloat16 if args.precision == "bfloat16" else torch.float32
 
     # Load OWLv2 open-vocabulary detector
-    owl = OwlWrapper(device, text_prompts=["object"], min_confidence=0.2,
-                     precision=args.precision)
+    owl = OwlWrapper(
+        device, text_prompts=["object"], min_confidence=0.2, precision=args.precision
+    )
 
     # Build one timed_obbs entry per actual RGB frame (not per pose timestamp).
     # For Aria, seq_ctx["rgb_timestamps"] is pose_ts (~200Hz); we need the real
@@ -183,8 +186,8 @@ def main():
             self._prompted_rgb_labels = []
 
             # SDP overlays
-            self.show_sdp_overlay = False   # raw point projection
-            self.show_sdp_patches = False   # 16x16 patch median depth
+            self.show_sdp_overlay = False  # raw point projection
+            self.show_sdp_patches = False  # 16x16 patch median depth
 
             # Always show 3DBBs in both RGB and 3D
             self.show_rgb_obbs = True
@@ -233,7 +236,11 @@ def main():
             # Try sdp_global first (ca1m, scannet)
             sdp_global = seq_ctx.get("sdp_global", None)
             if sdp_global is not None and len(sdp_global) > 0:
-                positions = sdp_global.astype(np.float32) if isinstance(sdp_global, np.ndarray) else sdp_global.numpy().astype(np.float32)
+                positions = (
+                    sdp_global.astype(np.float32)
+                    if isinstance(sdp_global, np.ndarray)
+                    else sdp_global.numpy().astype(np.float32)
+                )
                 P = len(positions)
                 self._sdp_positions = positions
                 colors = np.full((P, 3), 0.25, dtype=np.float32)
@@ -321,9 +328,7 @@ def main():
 
             # Place eye behind and above the camera
             offset_local = np.array([0.0, 0.0, -self.follow_behind])
-            offset = R_wc @ offset_local + np.array(
-                [0.0, 0.0, self.follow_above]
-            )
+            offset = R_wc @ offset_local + np.array([0.0, 0.0, self.follow_above])
             eye = cam_pos + offset
 
             # Look ahead along camera's forward direction (XY plane)
@@ -348,24 +353,18 @@ def main():
                 self._smooth_target = target.copy()
                 self._smooth_up = up.copy()
             else:
-                self._smooth_eye = (
-                    alpha * eye + (1.0 - alpha) * self._smooth_eye
-                )
+                self._smooth_eye = alpha * eye + (1.0 - alpha) * self._smooth_eye
                 self._smooth_target = (
                     alpha * target + (1.0 - alpha) * self._smooth_target
                 )
-                self._smooth_up = (
-                    alpha * up + (1.0 - alpha) * self._smooth_up
-                )
+                self._smooth_up = alpha * up + (1.0 - alpha) * self._smooth_up
                 norm = np.linalg.norm(self._smooth_up)
                 if norm > 1e-6:
                     self._smooth_up /= norm
 
             vw, vh = self._get_3d_viewport_size()
             aspect = vw / vh
-            projection = _perspective_projection(
-                45.0, aspect, 0.1, 100.0
-            )
+            projection = _perspective_projection(45.0, aspect, 0.1, 100.0)
             view = _look_at(
                 tuple(self._smooth_eye),
                 tuple(self._smooth_target),
@@ -390,9 +389,7 @@ def main():
                 R_wc = T_wc.R.reshape(3, 3).cpu().float().numpy()
 
                 offset_local = np.array([0.0, 0.0, -self.follow_behind])
-                offset = R_wc @ offset_local + np.array(
-                    [0.0, 0.0, self.follow_above]
-                )
+                offset = R_wc @ offset_local + np.array([0.0, 0.0, self.follow_above])
                 eye = cam_pos + offset
 
                 forward_world = R_wc @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
@@ -417,9 +414,7 @@ def main():
                 self.camera_elevation = float(
                     np.degrees(np.arcsin(diff[2] / self.camera_distance))
                 )
-                self.camera_azimuth = float(
-                    np.degrees(np.arctan2(diff[1], diff[0]))
-                )
+                self.camera_azimuth = float(np.degrees(np.arctan2(diff[1], diff[0])))
 
             # Reset smoothing so follow-view starts clean if toggled on
             self._smooth_eye = None
@@ -518,8 +513,10 @@ def main():
             """Get semi-dense world points for the given timestamp."""
             loader = self._sdp_loader
             # Aria path: per-timestamp SDP via SLAM observations
-            if loader is not None and hasattr(loader, "time_to_uids_combined") and hasattr(
-                loader, "p3_array"
+            if (
+                loader is not None
+                and hasattr(loader, "time_to_uids_combined")
+                and hasattr(loader, "p3_array")
             ):
                 sdp_times = loader.sdp_times_combined
                 if len(sdp_times) > 0:
@@ -570,9 +567,7 @@ def main():
             H, W = img_np.shape[:2]
             bxr_hw = boxernet.hw
             img_resized = cv2.resize(img_np, (bxr_hw, bxr_hw))
-            img_torch = (
-                torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
-            )
+            img_torch = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
 
             scale_x = bxr_hw / W
             scale_y = bxr_hw / H
@@ -627,9 +622,7 @@ def main():
                         self._prompted_obbs.append(obb)
                         self._prompted_labels.append("")
                         self._prompted_colors.append(
-                            _BOX_COLORS[
-                                len(self._prompted_obbs) % len(_BOX_COLORS)
-                            ]
+                            _BOX_COLORS[len(self._prompted_obbs) % len(_BOX_COLORS)]
                         )
                         self._prompt_dirty = True
                         self._flash_text = f"conf={conf:.2f}"
@@ -699,7 +692,9 @@ def main():
 
             n_dets = len(boxes)
             if n_dets == 0:
-                print(f"OWL: 0 detections for '{self._owl_text}' ({self._owl_dt_owl:.0f}ms)")
+                print(
+                    f"OWL: 0 detections for '{self._owl_text}' ({self._owl_dt_owl:.0f}ms)"
+                )
                 self._flash_text = f"0 detections for '{self._owl_text}'"
                 self._flash_color = (1.0, 0.2, 0.2)
                 self._flash_time = 1.5
@@ -712,12 +707,13 @@ def main():
                 return
 
             # Store 2D results for overlay, pre-assign colors to match 3D
-            self._owl_2d_boxes = boxes.numpy()  # (N, 4) in (x1, x2, y1, y2) raw image coords
+            self._owl_2d_boxes = (
+                boxes.numpy()
+            )  # (N, 4) in (x1, x2, y1, y2) raw image coords
             self._owl_2d_scores = scores2d.numpy()  # (N,)
             base = len(self._prompted_obbs)
             self._owl_2d_colors = [
-                _BOX_COLORS[(base + 1 + i) % len(_BOX_COLORS)]
-                for i in range(n_dets)
+                _BOX_COLORS[(base + 1 + i) % len(_BOX_COLORS)] for i in range(n_dets)
             ]
 
             # Cache BoxerNet datum for stage 2
@@ -731,9 +727,7 @@ def main():
             bb2d[:, 3] *= scale_y
 
             img_resized = cv2.resize(img_np, (bxr_hw, bxr_hw))
-            img_torch = (
-                torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
-            )
+            img_torch = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
 
             cam_data = cam._data.clone()
             cam_scaled = CameraTW(cam_data)
@@ -761,7 +755,9 @@ def main():
                     datum[k] = v.to(device)
             self._owl_cached_datum = datum
 
-            print(f"OWL: {n_dets} detections for '{self._owl_text}' ({self._owl_dt_owl:.0f}ms)")
+            print(
+                f"OWL: {n_dets} detections for '{self._owl_text}' ({self._owl_dt_owl:.0f}ms)"
+            )
             self._owl_stage = 1
             self._owl_stage_time = 12.0
 
@@ -792,16 +788,11 @@ def main():
                         n_accepted += 1
                         self._prompted_obbs.append(obb)
                         self._prompted_labels.append(self._owl_text)
-                        self._prompted_colors.append(
-                            self._owl_2d_colors[i
-                            ]
-                        )
+                        self._prompted_colors.append(self._owl_2d_colors[i])
 
                 self._prompt_dirty = True
                 n_dets = len(obb_pr_w)
-                timing = (
-                    f"owl:{self._owl_dt_owl:.0f}ms bxr:{self._owl_dt_bxr:.0f}ms"
-                )
+                timing = f"owl:{self._owl_dt_owl:.0f}ms bxr:{self._owl_dt_bxr:.0f}ms"
                 print(
                     f"BoxerNet lift: {n_accepted}/{n_dets} accepted "
                     f"(>={self.conf_threshold:.2f}) {timing}"
@@ -864,7 +855,9 @@ def main():
             ):
                 idx = int(find_nearest2(self._rgb_timestamps, ts_ns))
                 tag = self._loader.image_tags[idx]
-                img_path = os.path.join(self._loader.data_dir, tag + ".wide", "image.png")
+                img_path = os.path.join(
+                    self._loader.data_dir, tag + ".wide", "image.png"
+                )
                 img = cv2.imread(img_path)
                 if img is not None:
                     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -963,18 +956,16 @@ def main():
 
             if len(self._prompted_obbs) > 0:
                 pts_t = torch.from_numpy(positions).float()
-                for obb, color in zip(
-                    self._prompted_obbs, self._prompted_colors
-                ):
+                for obb, color in zip(self._prompted_obbs, self._prompted_colors):
                     inside = obb.points_inside_bb3(pts_t).numpy()
                     colors[inside] = color
                     any_inside |= inside
 
             # Outside points -> main VBO
             outside = ~any_inside
-            out_data = np.hstack(
-                [positions[outside], colors[outside]]
-            ).astype(np.float32)
+            out_data = np.hstack([positions[outside], colors[outside]]).astype(
+                np.float32
+            )
             self._sdp_point_count = int(outside.sum())
             if self._sdp_point_vbo is not None:
                 self._sdp_point_vbo.release()
@@ -987,9 +978,9 @@ def main():
             # Inside points -> separate VBO (rendered at 2x size)
             n_inside = int(any_inside.sum())
             if n_inside > 0:
-                in_data = np.hstack(
-                    [positions[any_inside], colors[any_inside]]
-                ).astype(np.float32)
+                in_data = np.hstack([positions[any_inside], colors[any_inside]]).astype(
+                    np.float32
+                )
                 if self._sdp_inside_vbo is not None:
                     self._sdp_inside_vbo.release()
                 self._sdp_inside_vbo = self.ctx.buffer(in_data.tobytes())
@@ -1077,9 +1068,7 @@ def main():
             # Render prompted OBB lines
             if self._prompt_line_vao is not None and self._prompt_line_count > 0:
                 self.line_prog["mvp"].write(mvp_bytes)
-                self.line_prog["line_width"].write(
-                    np.array(3.0, dtype="f4").tobytes()
-                )
+                self.line_prog["line_width"].write(np.array(3.0, dtype="f4").tobytes())
                 self.line_prog["prob_threshold"].write(
                     np.array(0.0, dtype="f4").tobytes()
                 )
@@ -1110,7 +1099,9 @@ def main():
             imgui.set_next_window_size(self.ui_panel_width, h - 95, imgui.ALWAYS)
             imgui.begin(
                 "OBB Controls",
-                flags=imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS,
+                flags=imgui.WINDOW_NO_MOVE
+                | imgui.WINDOW_NO_RESIZE
+                | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS,
             )
             self._render_main_controls()
             imgui.end()
@@ -1128,7 +1119,9 @@ def main():
                 imgui.set_next_window_size(panel_w, panel_h, imgui.ALWAYS)
                 expanded, _ = imgui.begin(
                     "RGB View",
-                    flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS,
+                    flags=imgui.WINDOW_NO_RESIZE
+                    | imgui.WINDOW_NO_MOVE
+                    | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS,
                 )
                 if expanded:
                     avail_w, avail_h = imgui.get_content_region_available()
@@ -1163,14 +1156,8 @@ def main():
                                 if edge_valid[e, s] and edge_valid[e, s + 1]:
                                     x0 = img_min.x + edge_pts[e, s, 0] * scale_x
                                     y0 = img_min.y + edge_pts[e, s, 1] * scale_y
-                                    x1 = (
-                                        img_min.x
-                                        + edge_pts[e, s + 1, 0] * scale_x
-                                    )
-                                    y1 = (
-                                        img_min.y
-                                        + edge_pts[e, s + 1, 1] * scale_y
-                                    )
+                                    x1 = img_min.x + edge_pts[e, s + 1, 0] * scale_x
+                                    y1 = img_min.y + edge_pts[e, s + 1, 1] * scale_y
                                     draw_list.add_line(
                                         x0,
                                         y0,
@@ -1214,9 +1201,7 @@ def main():
                     text = f"Detecting '{self._owl_text}'..."
                     tw = len(text) * 7 + 16
                     col = imgui.get_color_u32_rgba(1.0, 1.0, 0.2, 1.0)
-                    draw_list.add_text(
-                        cx - tw / 2 + 8, cy - 8, col, text
-                    )
+                    draw_list.add_text(cx - tw / 2 + 8, cy - 8, col, text)
                 self._owl_stage = -2  # will run OWL next frame
 
             elif self._owl_stage == -2:
@@ -1229,9 +1214,7 @@ def main():
                     text = f"Detecting '{self._owl_text}'..."
                     tw = len(text) * 7 + 16
                     col = imgui.get_color_u32_rgba(1.0, 1.0, 0.2, 1.0)
-                    draw_list.add_text(
-                        cx - tw / 2 + 8, cy - 8, col, text
-                    )
+                    draw_list.add_text(cx - tw / 2 + 8, cy - 8, col, text)
                 self._run_owl_prompt()
 
             if self._owl_stage > 0:
@@ -1257,9 +1240,7 @@ def main():
                         )
                         # Score label at top-left of box
                         label = f"{score:.2f}"
-                        draw_list.add_text(
-                            tl[0] + 4, tl[1] - 16, col, label
-                        )
+                        draw_list.add_text(tl[0] + 4, tl[1] - 16, col, label)
 
                     # Lift to 3D on the next frame (so 2D BBs render first)
                     if self._owl_stage_time < 12.0:
@@ -1289,9 +1270,7 @@ def main():
                         # 3D conf label
                         tag = "3D" if accepted else "rej"
                         label = f"{tag} {conf3d:.2f}"
-                        draw_list.add_text(
-                            tl[0] + 4, tl[1] - 16, col, label
-                        )
+                        draw_list.add_text(tl[0] + 4, tl[1] - 16, col, label)
 
                     if self._owl_stage_time <= 0:
                         self._owl_stage = 0
@@ -1388,7 +1367,9 @@ def main():
             imgui.spacing()
             imgui.push_item_width(300)
             enter_pressed, self._owl_text = imgui.input_text(
-                "##owl_prompt", self._owl_text, 256,
+                "##owl_prompt",
+                self._owl_text,
+                256,
                 flags=imgui.INPUT_TEXT_ENTER_RETURNS_TRUE,
             )
             self._owl_text_active = imgui.is_item_active()
@@ -1436,9 +1417,7 @@ def main():
             _changed, self.show_frustum = imgui.checkbox(
                 "Show Frustum", self.show_frustum
             )
-            _changed, self.show_rgb = imgui.checkbox(
-                "Show RGB Panel", self.show_rgb
-            )
+            _changed, self.show_rgb = imgui.checkbox("Show RGB Panel", self.show_rgb)
             if self.show_rgb:
                 _changed, self.rgb_panel_max_frac = imgui.slider_float(
                     "RGB Panel Width", self.rgb_panel_max_frac, 0.25, 0.75
@@ -1472,9 +1451,7 @@ def main():
             self._section_header("Points")
             if self._sdp_point_count > 0:
                 imgui.text(f"{self._sdp_point_count} semi-dense points")
-                _changed, self.show_sdp = imgui.checkbox(
-                    "Show Points", self.show_sdp
-                )
+                _changed, self.show_sdp = imgui.checkbox("Show Points", self.show_sdp)
                 imgui.push_item_width(200)
                 _changed, self.sdp_point_size = imgui.slider_float(
                     "Point Size", self.sdp_point_size, 1.0, 10.0
@@ -1548,17 +1525,10 @@ def main():
             if self._rgb_vrs_w > 0 and self._rgb_vrs_h > 0:
                 cam_w = cam.size[..., 0].item()
                 cam_h = cam.size[..., 1].item()
-                if (
-                    abs(cam_w - self._rgb_vrs_w) > 1
-                    or abs(cam_h - self._rgb_vrs_h) > 1
-                ):
-                    proj_cam = cam.scale_to_size(
-                        (self._rgb_vrs_w, self._rgb_vrs_h)
-                    )
+                if abs(cam_w - self._rgb_vrs_w) > 1 or abs(cam_h - self._rgb_vrs_h) > 1:
+                    proj_cam = cam.scale_to_size((self._rgb_vrs_w, self._rgb_vrs_h))
             fov = 140.0 if self._vrs_is_nebula else 120.0
-            pts_2d, valid = proj_cam.project(
-                pts_cam.unsqueeze(0), fov_deg=fov
-            )
+            pts_2d, valid = proj_cam.project(pts_cam.unsqueeze(0), fov_deg=fov)
             pts_2d = pts_2d.squeeze(0).cpu().numpy()
             valid = valid.squeeze(0).cpu().numpy()
             depths = pts_cam[:, 2].cpu().numpy()
@@ -1602,9 +1572,7 @@ def main():
 
             # Colorize with jet and blend at 40% overlay
             max_depth, min_depth = 5.0, 0.1
-            d_norm = np.clip(
-                (depth_img - min_depth) / (max_depth - min_depth), 0, 1
-            )
+            d_norm = np.clip((depth_img - min_depth) / (max_depth - min_depth), 0, 1)
             d_u8 = (d_norm * 255).astype(np.uint8)
             d_color = cv2.applyColorMap(d_u8, cv2.COLORMAP_JET)
             d_color_rgb = cv2.cvtColor(d_color, cv2.COLOR_BGR2RGB)
@@ -1666,7 +1634,9 @@ def main():
                 sdp_w.unsqueeze(0).float(),
                 cam_scaled.float(),
                 T_wr.float(),
-                bxr_hw, bxr_hw, patch_size,
+                bxr_hw,
+                bxr_hw,
+                patch_size,
             )  # (1, 1, fH, fW)
 
             rotated = not self._vrs_is_nebula
@@ -1674,9 +1644,7 @@ def main():
             viz_sdp_bgr, sdp_resized = render_depth_patches(
                 sdp_patch[0].cpu(), rotated=rotated, HH=HH, WW=WW
             )
-            viz_sdp = cv2.cvtColor(
-                np.ascontiguousarray(viz_sdp_bgr), cv2.COLOR_BGR2RGB
-            )
+            viz_sdp = cv2.cvtColor(np.ascontiguousarray(viz_sdp_bgr), cv2.COLOR_BGR2RGB)
             mask = sdp_resized > 0.1
             if mask.any():
                 mask3 = mask[:, :, None]
@@ -1684,10 +1652,7 @@ def main():
                 blended = np.where(
                     mask3,
                     (
-                        (
-                            viz_sdp.astype(np.uint16) * 51
-                            + rgb.astype(np.uint16) * 205
-                        )
+                        (viz_sdp.astype(np.uint16) * 51 + rgb.astype(np.uint16) * 205)
                         >> 8
                     ).astype(np.uint8),
                     rgb,

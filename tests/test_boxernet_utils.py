@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Tests for boxernet/boxernet.py utility functions (no model weights needed)."""
 
 import pytest
@@ -54,10 +58,12 @@ class TestMaskedMedian:
         assert result.item() == 42.0
 
     def test_batch(self):
-        x = torch.tensor([
-            [1.0, 2.0, 3.0],
-            [10.0, 20.0, 30.0],
-        ])
+        x = torch.tensor(
+            [
+                [1.0, 2.0, 3.0],
+                [10.0, 20.0, 30.0],
+            ]
+        )
         mask = torch.ones_like(x, dtype=torch.bool)
         result = masked_median(x, mask, dim=1)
         assert result[0].item() == 2.0

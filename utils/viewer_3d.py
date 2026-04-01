@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-ignore-all-errors
 """
 Base class for 3D visualization with orbit controls and ImGui UI.
@@ -57,6 +61,7 @@ import imgui
 import moderngl_window as mglw
 import numpy as np
 from moderngl_window.integrations.imgui import ModernglWindowRenderer
+
 scale_factor = 1
 if platform.system() == "Linux":
     scale_factor = 2
@@ -459,7 +464,6 @@ class OrbitViewer(mglw.WindowConfig):
         self.imgui.unicode_char_entered(char)
 
 
-
 import argparse
 import colorsys
 import hashlib
@@ -524,8 +528,7 @@ def build_seq_ctx(input_path, dataset_type):
         rgb_num_frames = loader.provider.get_num_data(rgb_stream_id)
         rgb_timestamps = (
             np.array(loader.pose_ts, dtype=np.int64)
-            if getattr(loader, "pose_ts", None) is not None
-            and len(loader.pose_ts) > 0
+            if getattr(loader, "pose_ts", None) is not None and len(loader.pose_ts) > 0
             else np.array([0], dtype=np.int64)
         )
         return {
@@ -567,7 +570,9 @@ def build_seq_ctx(input_path, dataset_type):
             "calibs": loader.cams,
             "calib_ts": rgb_timestamps,
             "loader": loader,
-            "sdp_global": loader.sdp_global.numpy() if len(loader.sdp_global) > 0 else None,
+            "sdp_global": loader.sdp_global.numpy()
+            if len(loader.sdp_global) > 0
+            else None,
             "time_to_uids_slaml": None,
             "time_to_uids_slamr": None,
             "uid_to_p3": None,
@@ -575,7 +580,9 @@ def build_seq_ctx(input_path, dataset_type):
     elif dataset_type == "scannet":
         loader = ScanNetLoader(
             scene_dir=input_path,
-            annotation_path=os.path.join(SAMPLE_DATA_PATH, "scannet", "full_annotations.json"),
+            annotation_path=os.path.join(
+                SAMPLE_DATA_PATH, "scannet", "full_annotations.json"
+            ),
             skip_frames=1,
             max_frames=None,
         )
@@ -726,17 +733,13 @@ def build_seq_ctx(input_path, dataset_type):
 
             # Build T_world_rig (same logic as OmniLoader.load)
             if input_path == "SUNRGBD":
-                R_ext = load_sunrgbd_extrinsics(
-                    loader.data_root, img_info["file_path"]
-                )
+                R_ext = load_sunrgbd_extrinsics(loader.data_root, img_info["file_path"])
                 if R_ext is not None:
                     R_yz = np.array(
                         [[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=np.float32
                     )
                     R_flat = (R_yz @ R_ext).flatten()
-                    T_wr_data = torch.tensor(
-                        [*R_flat, 0, 0, 0], dtype=torch.float32
-                    )
+                    T_wr_data = torch.tensor([*R_flat, 0, 0, 0], dtype=torch.float32)
                 else:
                     T_wr_data = torch.tensor(
                         [1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0],
@@ -819,7 +822,11 @@ def load_view_file(log_dir, load_view_arg):
 
 def resolve_bb2d_csv(log_dir, bb2d_csv_arg, write_name):
     """Resolve 2D BB CSV path. Raises IOError if not found."""
-    path = os.path.join(log_dir, bb2d_csv_arg) if bb2d_csv_arg else os.path.join(log_dir, "owl_2dbbs.csv")
+    path = (
+        os.path.join(log_dir, bb2d_csv_arg)
+        if bb2d_csv_arg
+        else os.path.join(log_dir, "owl_2dbbs.csv")
+    )
     if not os.path.exists(path):
         raise IOError(f"2D BB CSV not found: {path}")
     return path
@@ -917,7 +924,9 @@ def _load_sequence_context_auto(
     seq_name: str,
     *,
     scannet_scene: str | None = None,
-    scannet_annotation_path: str = os.path.join(SAMPLE_DATA_PATH, "scannet", "full_annotations.json"),
+    scannet_annotation_path: str = os.path.join(
+        SAMPLE_DATA_PATH, "scannet", "full_annotations.json"
+    ),
     with_sdp: bool = False,
     start_frame: int = 0,
     max_frames: int = 0,
@@ -1098,7 +1107,9 @@ def _load_sequence_context_auto(
         data["time_to_uids_slaml"] = getattr(loader, "time_to_uids_slaml", None)
         data["time_to_uids_slamr"] = getattr(loader, "time_to_uids_slamr", None)
         data["uid_to_p3"] = getattr(loader, "uid_to_p3", None)
-    _startup_log(f"Context ready (Aria) in {(time_module.perf_counter() - t_aria0):.2f}s")
+    _startup_log(
+        f"Context ready (Aria) in {(time_module.perf_counter() - t_aria0):.2f}s"
+    )
     return data
 
 
@@ -1420,7 +1431,9 @@ class OBBViewer(OrbitViewer):
         if getattr(self, "color_mode", None) == COLOR_MODE_RANDOM:
             if hasattr(self, "_build_geometry_cache"):
                 self._build_geometry_cache()
-            if getattr(self, "tracked_all_instances", None) and hasattr(self.tracked_all_instances[0], "obb"):
+            if getattr(self, "tracked_all_instances", None) and hasattr(
+                self.tracked_all_instances[0], "obb"
+            ):
                 self._build_tracked_all_geometry()
             if hasattr(self, "_rgb_tracked_all_color_cache"):
                 self._rgb_tracked_all_color_cache = None
@@ -1526,7 +1539,6 @@ class OBBViewer(OrbitViewer):
         }
         torch.save(view_data, self.view_save_path)
         print(f"Saved camera view to {self.view_save_path}")
-
 
     def _save_screenshot(self) -> None:
         """Save the current framebuffer as a PNG image."""
@@ -1789,6 +1801,7 @@ class OBBViewer(OrbitViewer):
         # Lazily compute embeddings if not precomputed (e.g. TrackerViewer with skip_precompute)
         if self._semantic_embeddings is None and len(self.all_obbs) > 0:
             from utils.fuse_3d_boxes import precompute_semantic_embeddings
+
             self._semantic_embeddings = precompute_semantic_embeddings(self.all_obbs)
 
         # Get semantic embeddings from cache using indices
@@ -2232,8 +2245,6 @@ class OBBViewer(OrbitViewer):
 
         return (screen_x, screen_y, True)
 
-
-
     def _step_to_frame(self, target_idx: int) -> None:
         """Seek to frame index and update frame OBB sets."""
         if self.total_frames == 0:
@@ -2243,18 +2254,9 @@ class OBBViewer(OrbitViewer):
         ts = self.sorted_timestamps[target_idx]
         self._set_frame_obb_sets(raw=self.timed_obbs.get(ts))
 
-
     def _step_forward(self) -> None:
         if self.current_frame_idx < self.total_frames - 1:
             self._step_to_frame(self.current_frame_idx + 1)
-
-
-
-
-
-
-
-
 
     def on_key_event(self, key, action, modifiers):
         """Keyboard shortcuts for RGB playback."""
@@ -2397,7 +2399,10 @@ class OBBViewer(OrbitViewer):
             )
 
         # Render visible tracked subset with thicker lines
-        if self.show_tracked_visible_set and getattr(self, "outline_instance_vao", None) is not None:
+        if (
+            self.show_tracked_visible_set
+            and getattr(self, "outline_instance_vao", None) is not None
+        ):
             self.line_prog["mvp"].write(mvp.astype("f4").tobytes())
             self.line_prog["alpha"].write(np.array(1.0, dtype="f4").tobytes())
             self.line_prog["prob_threshold"].write(np.array(0.0, dtype="f4").tobytes())
@@ -2440,7 +2445,9 @@ class OBBViewer(OrbitViewer):
         w, h = self.wnd.size
 
         imgui.set_next_window_position(0, 0, imgui.ONCE)
-        imgui.set_next_window_size(self.ui_panel_width, h, imgui.ALWAYS)  # Always match window height
+        imgui.set_next_window_size(
+            self.ui_panel_width, h, imgui.ALWAYS
+        )  # Always match window height
 
         imgui.begin("OBB Controls", flags=imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_RESIZE)
 
@@ -2473,7 +2480,9 @@ class OBBViewer(OrbitViewer):
 
         if show_sets_header:
             imgui.text("OBB Sets")
-        _changed, self.show_raw_set = imgui.checkbox(raw_checkbox_label, self.show_raw_set)
+        _changed, self.show_raw_set = imgui.checkbox(
+            raw_checkbox_label, self.show_raw_set
+        )
         _changed, self.show_tracked_all_set = imgui.checkbox(
             tracked_all_checkbox_label, self.show_tracked_all_set
         )
@@ -2524,8 +2533,7 @@ class OBBViewer(OrbitViewer):
             or self._last_fusion_semantic_threshold != self.fusion_semantic_threshold
             or self._last_fusion_enable_nms != self.fusion_enable_nms
             or self._last_fusion_nms_iou_threshold != self.fusion_nms_iou_threshold
-            or self._last_fusion_prob_threshold
-            != self.prob_threshold
+            or self._last_fusion_prob_threshold != self.prob_threshold
         )
 
         button_label = (
@@ -2640,11 +2648,13 @@ class OBBViewer(OrbitViewer):
             imgui.end_tooltip()
 
         if self.tracked_all_instances:
-            valid_instances = [inst for inst in self.tracked_all_instances if hasattr(inst, "support_count")]
+            valid_instances = [
+                inst
+                for inst in self.tracked_all_instances
+                if hasattr(inst, "support_count")
+            ]
             imgui.text(f"Fused: {len(valid_instances)} instances")
-            total_detections = sum(
-                inst.support_count for inst in valid_instances
-            )
+            total_detections = sum(inst.support_count for inst in valid_instances)
             imgui.text(f"  From: {total_detections} detections")
 
     def _render_playback_controls(self) -> None:
@@ -2783,7 +2793,9 @@ class SequenceOBBViewer(OBBViewer):
         view_save_path: str = "",
         seq_name: str = "",
         scannet_scene: str | None = None,
-        scannet_annotation_path: str = os.path.join(SAMPLE_DATA_PATH, "scannet", "full_annotations.json"),
+        scannet_annotation_path: str = os.path.join(
+            SAMPLE_DATA_PATH, "scannet", "full_annotations.json"
+        ),
         seq_ctx: dict | None = None,
         **kwargs: Any,
     ) -> None:
@@ -2891,7 +2903,9 @@ class SequenceOBBViewer(OBBViewer):
         has_preloaded_context = (
             has_rgb_timeline and (self.traj is not None) and (self.calibs is not None)
         )
-        skip_context = self._prebuilt_seq_ctx is not None and len(self._prebuilt_seq_ctx) == 0
+        skip_context = (
+            self._prebuilt_seq_ctx is not None and len(self._prebuilt_seq_ctx) == 0
+        )
         if self.total_frames > 0 and not has_preloaded_context and not skip_context:
             try:
                 t_ctx0 = time_module.perf_counter()
@@ -3019,10 +3033,7 @@ class SequenceOBBViewer(OBBViewer):
         if ts_key in self._rgb_lru_cache:
             img = self._rgb_lru_cache[ts_key]
             self._rgb_lru_cache.move_to_end(ts_key)
-        elif (
-            getattr(self, "_data_source", None) == "aria"
-            and self._loader is not None
-        ):
+        elif getattr(self, "_data_source", None) == "aria" and self._loader is not None:
             frame_idx = int(self._loader._find_frame_by_timestamp(int(ts_ns)))
             stream_id = self._loader.stream_id[0]
             calibs = self._loader.calibs[0]
@@ -3071,7 +3082,9 @@ class SequenceOBBViewer(OBBViewer):
                 self._rgb_lru_cache[frame_id] = img
                 if len(self._rgb_lru_cache) > self._rgb_lru_max_items:
                     self._rgb_lru_cache.popitem(last=False)
-        elif getattr(self, "_data_source", None) == "omni3d" and self._loader is not None:
+        elif (
+            getattr(self, "_data_source", None) == "omni3d" and self._loader is not None
+        ):
             datum = self._loader.load(idx)
             img_t = datum["img0"][0].permute(1, 2, 0).cpu().numpy()
             img = np.clip(img_t * 255.0, 0, 255).astype(np.uint8)
@@ -3760,9 +3773,7 @@ class SequenceOBBViewer(OBBViewer):
         _changed, self.show_trajectory = imgui.checkbox(
             "Show Trajectory", self.show_trajectory
         )
-        _changed, self.show_frustum = imgui.checkbox(
-            "Show Frustum", self.show_frustum
-        )
+        _changed, self.show_frustum = imgui.checkbox("Show Frustum", self.show_frustum)
         _changed, self.show_rgb = imgui.checkbox("Show RGB Panel", self.show_rgb)
         if self.show_rgb:
             imgui.push_item_width(200)
@@ -3847,7 +3858,9 @@ class TrackerViewer(SequenceOBBViewer):
         init_image_panel_width: Optional[float] = None,
         verbose: bool = False,
         scannet_scene: str | None = None,
-        scannet_annotation_path: str = os.path.join(SAMPLE_DATA_PATH, "scannet", "full_annotations.json"),
+        scannet_annotation_path: str = os.path.join(
+            SAMPLE_DATA_PATH, "scannet", "full_annotations.json"
+        ),
         seq_ctx: dict | None = None,
         freeze_tracker: bool = False,
         **kwargs: Any,
@@ -4061,7 +4074,9 @@ class TrackerViewer(SequenceOBBViewer):
         self._bb2d_data: Optional[Dict[int, dict]] = None
         self._bb2d_timestamps: Optional[np.ndarray] = None
         self._bb2d_current_boxes: list[tuple[float, float, float, float, str, int]] = []
-        self.show_bb2_panel = True  # toggle for the top BB2 panel (per-frame 2D detections)
+        self.show_bb2_panel = (
+            True  # toggle for the top BB2 panel (per-frame 2D detections)
+        )
         self.show_bb2_csv = True  # toggle CSV BB2s in top panel
         if bb2d_csv_path and os.path.exists(bb2d_csv_path):
             self._bb2d_data = load_bb2d_csv(bb2d_csv_path)
@@ -4177,7 +4192,11 @@ class TrackerViewer(SequenceOBBViewer):
                 all_obbs_list = []
                 for ts in self.sorted_timestamps:
                     all_obbs_list.extend(self.timed_obbs[ts])
-                self._all_frames_obbs = torch.stack(all_obbs_list) if all_obbs_list else ObbTW(torch.zeros(0, 165))
+                self._all_frames_obbs = (
+                    torch.stack(all_obbs_list)
+                    if all_obbs_list
+                    else ObbTW(torch.zeros(0, 165))
+                )
                 all_obbs_for_init = self._all_frames_obbs
             else:
                 all_obbs_for_init = self.timed_obbs[self.sorted_timestamps[0]]
@@ -4411,9 +4430,7 @@ class TrackerViewer(SequenceOBBViewer):
             self.camera_elevation = float(
                 np.degrees(np.arcsin(diff[2] / self.camera_distance))
             )
-            self.camera_azimuth = float(
-                np.degrees(np.arctan2(diff[1], diff[0]))
-            )
+            self.camera_azimuth = float(np.degrees(np.arctan2(diff[1], diff[0])))
 
     def _get_params_snapshot(self) -> tuple:
         """Return a tuple of current tracker params for staleness comparison."""
@@ -5247,9 +5264,7 @@ class TrackerViewer(SequenceOBBViewer):
                 shown_track_obbs = torch.stack([t.obb for t in shown_tracks])
                 t_colors = self._obbs_random_colors(shown_track_obbs).cpu()
             else:  # Health (default)
-                health_colors_rgba = cm.jet(np.array(health_scores))[
-                    :, :3
-                ]  # (M, 3)
+                health_colors_rgba = cm.jet(np.array(health_scores))[:, :3]  # (M, 3)
                 t_colors = torch.from_numpy(health_colors_rgba.astype(np.float32))
 
             label_colors = [t_colors[i].numpy() for i in range(M)]
@@ -6056,7 +6071,11 @@ class TrackerViewer(SequenceOBBViewer):
             changed, self.traj_tail_secs = imgui.slider_float(
                 "Traj Tail (s)", self.traj_tail_secs, 0.5, 30.0
             )
-            if changed and self._traj_all_segments is not None and self.total_frames > 0:
+            if (
+                changed
+                and self._traj_all_segments is not None
+                and self.total_frames > 0
+            ):
                 ts = self.sorted_timestamps[self.current_frame_idx]
                 self._update_trajectory_tail(ts)
             changed, self.frustum_scale = imgui.slider_float(
@@ -6214,7 +6233,11 @@ class TrackerViewer(SequenceOBBViewer):
 
                     # Draw raw per-frame 3DBB projections
                     if self.show_rgb_obbs and self._rgb_projected_raw_lines:
-                        for edge_pts, edge_valid, color in self._rgb_projected_raw_lines:
+                        for (
+                            edge_pts,
+                            edge_valid,
+                            color,
+                        ) in self._rgb_projected_raw_lines:
                             col = imgui.get_color_u32_rgba(
                                 float(color[0]), float(color[1]), float(color[2]), 1.0
                             )

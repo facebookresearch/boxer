@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 import contextlib
 import os
@@ -507,7 +511,11 @@ class AriaLoader(BaseLoader):
 
         # traj: Use self.pose_ts min/max
         if self.with_traj and hasattr(self, "pose_ts") and len(self.pose_ts) > 0:
-            modalities["traj"] = (self.pose_ts.min(), self.pose_ts.max(), len(self.pose_ts))
+            modalities["traj"] = (
+                self.pose_ts.min(),
+                self.pose_ts.max(),
+                len(self.pose_ts),
+            )
 
         # sdp: Use self.sdp_times_combined min/max
         if (
@@ -744,7 +752,10 @@ class AriaLoader(BaseLoader):
                 actual_cx = cam.c[0].item()
                 actual_cy = cam.c[1].item()
                 pp_thresh = 0.02 * max(resizeW, resizeH)
-                if abs(actual_cx - expected_cx) > pp_thresh or abs(actual_cy - expected_cy) > pp_thresh:
+                if (
+                    abs(actual_cx - expected_cx) > pp_thresh
+                    or abs(actual_cy - expected_cy) > pp_thresh
+                ):
                     print(
                         f"==> Warning: Principal point is off-center. "
                         f"Before resize: expected=({expected_cx_orig:.1f}, {expected_cy_orig:.1f}), actual=({actual_cx_orig:.1f}, {actual_cy_orig:.1f}). "

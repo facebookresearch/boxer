@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 import json
 import os
@@ -196,8 +200,7 @@ class OmniLoader(BaseLoader):
 
         # Find semantic IDs for floor and wall classes to filter out
         self.structure_sem_ids = (
-            self.find_structure_sem_ids(self.sem_id_to_name)
-            if remove_structure else []
+            self.find_structure_sem_ids(self.sem_id_to_name) if remove_structure else []
         )
 
         num_annotations = sum(len(v) for v in self.img_id_to_anns.values())
@@ -274,9 +277,7 @@ class OmniLoader(BaseLoader):
 
                 if self.resize is not None:
                     depth_pil = Image.fromarray(depth_np)
-                    depth_pil = depth_pil.resize(
-                        (resizeW, resizeH), Image.NEAREST
-                    )
+                    depth_pil = depth_pil.resize((resizeW, resizeH), Image.NEAREST)
                     depth_np = np.array(depth_pil)
 
                 depth_np_pinhole = depth_np
@@ -407,9 +408,14 @@ class OmniLoader(BaseLoader):
         obb_list = []
         if self.debug:
             debug_stats = {
-                "total": 0, "invalid_valid3D": 0, "no_bbox3D_cam": 0,
-                "bad_shape": 0, "invalid_center": 0, "behind_camera": 0,
-                "category_filtered": 0, "kept": 0,
+                "total": 0,
+                "invalid_valid3D": 0,
+                "no_bbox3D_cam": 0,
+                "bad_shape": 0,
+                "invalid_center": 0,
+                "behind_camera": 0,
+                "category_filtered": 0,
+                "kept": 0,
             }
         for ann in anns:
             if self.debug:

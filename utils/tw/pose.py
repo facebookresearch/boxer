@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 import math
 from typing import Dict, List, Tuple, Union
@@ -16,11 +20,14 @@ def quat_to_rotmat(qw, qx, qy, qz):
     wx, wy, wz = s * qw * qx, s * qw * qy, s * qw * qz
     xx, xy, xz = s * qx * qx, s * qx * qy, s * qx * qz
     yy, yz, zz = s * qy * qy, s * qy * qz, s * qz * qz
-    return np.array([
-        [1 - (yy + zz), xy - wz, xz + wy],
-        [xy + wz, 1 - (xx + zz), yz - wx],
-        [xz - wy, yz + wx, 1 - (xx + yy)],
-    ], dtype=np.float64)
+    return np.array(
+        [
+            [1 - (yy + zz), xy - wz, xz + wy],
+            [xy + wz, 1 - (xx + zz), yz - wx],
+            [xz - wy, yz + wx, 1 - (xx + yy)],
+        ],
+        dtype=np.float64,
+    )
 
 
 def rotmat_to_quat(R):
@@ -74,6 +81,7 @@ def quat_slerp(q1, q2, t=0.5):
     b = math.sin(t * theta) / sin_theta
     result = a * q1 + b * q2
     return result / np.linalg.norm(result)
+
 
 IdentityPose = torch.tensor(
     [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]

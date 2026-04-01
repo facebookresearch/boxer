@@ -1,4 +1,6 @@
-# (c) Facebook, Inc. and its affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
 
 # pyre-unsafe
 
@@ -128,7 +130,9 @@ class AttentionBlockV2(nn.Module):
 class AleHead(torch.nn.Module):
     """Aleatoric uncertainty head. Predicts 3D bounding boxes."""
 
-    def __init__(self, in_dim, out_dim=7, hidden_dim=128, norm_chamfer=False, min_dim=0.05):
+    def __init__(
+        self, in_dim, out_dim=7, hidden_dim=128, norm_chamfer=False, min_dim=0.05
+    ):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -209,7 +213,6 @@ class AleHead(torch.nn.Module):
         output["obbs_pr_params"] = params_v
         output["obbs_pr_logvar"] = logvar
         return batch, output
-
 
 
 def image_to_patches(x, patch_size=14):
@@ -494,15 +497,21 @@ def smart_load(model_dict, ckpt_dict):
     )
     if has_issues:
         if shape_mismatch_count > 0:
-            print(f"  Shape mismatch: {shape_mismatch_count} tensors, {fmt(shape_mismatch_params)} params")
+            print(
+                f"  Shape mismatch: {shape_mismatch_count} tensors, {fmt(shape_mismatch_params)} params"
+            )
             for key, cs, ms in shape_mismatch_keys[:20]:
                 print(f"    {key}: ckpt={list(cs)} model={list(ms)}")
         if missing_count > 0:
-            print(f"  Not in model: {missing_count} tensors, {fmt(missing_params)} params")
+            print(
+                f"  Not in model: {missing_count} tensors, {fmt(missing_params)} params"
+            )
             for key in missing_keys[:20]:
                 print(f"    {key}: {list(ckpt_dict[key].shape)}")
         if not_loaded_count > 0:
-            print(f"  Not from ckpt: {not_loaded_count} tensors, {fmt(not_loaded_params)} params")
+            print(
+                f"  Not from ckpt: {not_loaded_count} tensors, {fmt(not_loaded_params)} params"
+            )
             for key in not_loaded_keys[:20]:
                 print(f"    {key}: {list(model_dict[key].shape)}")
     return new_ckpt_dict
@@ -576,7 +585,6 @@ class BoxerNet(nn.Module):
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         cfg = ckpt["cfg"]
         hw = cfg["dataset"]["image_hw"]
-
 
         model = cls(cfg["model"])
         model_dict = model.state_dict()
@@ -665,9 +673,7 @@ class BoxerNet(nn.Module):
 
             # Render semi-dense points as patches.
             sdp_w = batch["sdp_w_padded"]
-            sdp_median = sdp_to_patches(
-                sdp_w, cam, T_wr, H, W, self.dino.patch_size
-            )
+            sdp_median = sdp_to_patches(sdp_w, cam, T_wr, H, W, self.dino.patch_size)
             out["sdp_patch0"] = sdp_median.clone()
             sdp_input = sdp_median.reshape(B, -1, fH * fW).permute(0, 2, 1)
             x = torch.cat([dino_feat, sdp_input], dim=-1)
@@ -678,9 +684,7 @@ class BoxerNet(nn.Module):
                 # print a loud warning if T_vc.t is not close to zero (loose tolerance).
                 # This is because we define the gravity aligned coordinate frame to have
                 # a (0,0,0) translation relative to the camera center.
-                if not torch.allclose(
-                    T_vc.t, torch.zeros_like(T_vc.t), atol=1e-2
-                ):
+                if not torch.allclose(T_vc.t, torch.zeros_like(T_vc.t), atol=1e-2):
                     print(
                         f"WARNING: T_vc.t is not close to zero: {T_vc.t}. This is not expected."
                     )

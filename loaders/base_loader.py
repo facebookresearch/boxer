@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 import threading
 from typing import Optional
@@ -210,9 +214,7 @@ class BaseLoader:
         dims_x = bb3[:, 1] - bb3[:, 0]
         dims_y = bb3[:, 3] - bb3[:, 2]
         dims_z = bb3[:, 5] - bb3[:, 4]
-        max_dims = torch.max(
-            torch.stack([dims_x, dims_y, dims_z], dim=1), dim=1
-        )[0]
+        max_dims = torch.max(torch.stack([dims_x, dims_y, dims_z], dim=1), dim=1)[0]
         return obbs[max_dims <= max_dimension]
 
     @staticmethod

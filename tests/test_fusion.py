@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Tests for fusion utilities: Hungarian algorithm, connected components, and 3D box fusion."""
 
 import math
@@ -23,6 +27,7 @@ try:
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import connected_components as scipy_connected_components
     from utils.fuse_3d_boxes import linear_sum_assignment
+
     _has_scipy = True
 except ImportError:
     _has_scipy = False
@@ -88,7 +93,9 @@ class TestHungarian:
         _assert_same_cost(cost, row, col, r_sp, c_sp)
         assert len(row) == size
 
-    @pytest.mark.parametrize("shape", [(3, 7), (7, 3), (10, 20), (20, 10), (1, 5), (5, 1)])
+    @pytest.mark.parametrize(
+        "shape", [(3, 7), (7, 3), (10, 20), (20, 10), (1, 5), (5, 1)]
+    )
     def test_rectangular(self, shape):
         rng = np.random.RandomState(hash(shape) % 2**31)
         cost = rng.rand(*shape) * 100
@@ -174,7 +181,9 @@ class TestConnectedComponents:
         scipy_clusters = [c for c in scipy_clusters if c]
 
         our_clusters = _union_find_components(n, edges)
-        assert _normalize_components(our_clusters) == _normalize_components(scipy_clusters)
+        assert _normalize_components(our_clusters) == _normalize_components(
+            scipy_clusters
+        )
 
     def test_empty(self):
         self._compare(0, [])
@@ -282,10 +291,14 @@ class TestAngularDistance(unittest.TestCase):
         self.assertAlmostEqual(angular_distance(0.0, math.pi), 0.0, places=5)
 
     def test_90_degrees(self):
-        self.assertAlmostEqual(angular_distance(0.0, math.pi / 2), math.pi / 2, places=5)
+        self.assertAlmostEqual(
+            angular_distance(0.0, math.pi / 2), math.pi / 2, places=5
+        )
 
     def test_45_degrees(self):
-        self.assertAlmostEqual(angular_distance(0.0, math.pi / 4), math.pi / 4, places=5)
+        self.assertAlmostEqual(
+            angular_distance(0.0, math.pi / 4), math.pi / 4, places=5
+        )
 
     def test_symmetric(self):
         self.assertAlmostEqual(
@@ -318,8 +331,12 @@ class TestAlignBoxesR90(unittest.TestCase):
         weights = torch.tensor([0.5, 0.5])
         aligned_sizes, aligned_yaws = align_boxes_r90(sizes, yaws, weights)
         # After alignment, both should have similar width/height
-        self.assertAlmostEqual(aligned_sizes[0, 0].item(), aligned_sizes[1, 0].item(), places=3)
-        self.assertAlmostEqual(aligned_sizes[0, 1].item(), aligned_sizes[1, 1].item(), places=3)
+        self.assertAlmostEqual(
+            aligned_sizes[0, 0].item(), aligned_sizes[1, 0].item(), places=3
+        )
+        self.assertAlmostEqual(
+            aligned_sizes[0, 1].item(), aligned_sizes[1, 1].item(), places=3
+        )
 
 
 # =============================================================================
@@ -333,7 +350,9 @@ class TestBoundingBox3DFuser(unittest.TestCase):
     def test_two_identical_boxes_fuse(self):
         """Two identical overlapping boxes should fuse into one instance."""
         fuser = BoundingBox3DFuser(
-            iou_threshold=0.3, min_detections=1, confidence_weighting="uniform",
+            iou_threshold=0.3,
+            min_detections=1,
+            confidence_weighting="uniform",
             conf_threshold=0.0,
         )
         obbs = [
@@ -348,7 +367,9 @@ class TestBoundingBox3DFuser(unittest.TestCase):
     def test_non_overlapping_boxes_stay_separate(self):
         """Well-separated boxes should not fuse."""
         fuser = BoundingBox3DFuser(
-            iou_threshold=0.3, min_detections=1, confidence_weighting="uniform",
+            iou_threshold=0.3,
+            min_detections=1,
+            confidence_weighting="uniform",
             conf_threshold=0.0,
         )
         obbs = [
@@ -363,13 +384,13 @@ class TestBoundingBox3DFuser(unittest.TestCase):
     def test_min_detections_filters(self):
         """Boxes below min_detections threshold should be filtered out."""
         fuser = BoundingBox3DFuser(
-            iou_threshold=0.3, min_detections=2, confidence_weighting="uniform",
+            iou_threshold=0.3,
+            min_detections=2,
+            confidence_weighting="uniform",
             conf_threshold=0.0,
         )
         # 3 non-overlapping single boxes — each cluster has support_count=1
-        obbs = [
-            _make_test_obb([i * 5.0, 0.0, 0.5]) for i in range(3)
-        ]
+        obbs = [_make_test_obb([i * 5.0, 0.0, 0.5]) for i in range(3)]
         detections = torch.stack(obbs)
         instances = fuser.fuse(detections)
         self.assertEqual(len(instances), 0)
@@ -377,11 +398,16 @@ class TestBoundingBox3DFuser(unittest.TestCase):
     def test_min_detections_1_preserves_all(self):
         """With min_detections=1, all non-overlapping boxes should survive."""
         fuser = BoundingBox3DFuser(
-            iou_threshold=0.3, min_detections=1, confidence_weighting="uniform",
+            iou_threshold=0.3,
+            min_detections=1,
+            confidence_weighting="uniform",
             conf_threshold=0.0,
         )
         num_boxes = 10
-        obbs = [_make_test_obb([i * 3.0, 0.0, 0.5], text=f"box_{i}") for i in range(num_boxes)]
+        obbs = [
+            _make_test_obb([i * 3.0, 0.0, 0.5], text=f"box_{i}")
+            for i in range(num_boxes)
+        ]
         detections = torch.stack(obbs)
         instances = fuser.fuse(detections)
         self.assertEqual(len(instances), num_boxes)
@@ -391,14 +417,18 @@ class TestBoundingBox3DFuser(unittest.TestCase):
     def test_overlapping_pairs_fuse(self):
         """Pairs of overlapping boxes should each fuse into one instance."""
         fuser = BoundingBox3DFuser(
-            iou_threshold=0.3, min_detections=1, confidence_weighting="uniform",
+            iou_threshold=0.3,
+            min_detections=1,
+            confidence_weighting="uniform",
             conf_threshold=0.0,
         )
         num_pairs = 5
         obbs = []
         for i in range(num_pairs):
             obbs.append(_make_test_obb([i * 5.0, 0.0, 0.5], prob=0.9, text=f"pair_{i}"))
-            obbs.append(_make_test_obb([i * 5.0, 0.0, 0.5], prob=0.85, text=f"pair_{i}"))
+            obbs.append(
+                _make_test_obb([i * 5.0, 0.0, 0.5], prob=0.85, text=f"pair_{i}")
+            )
         detections = torch.stack(obbs)
         instances = fuser.fuse(detections)
         self.assertEqual(len(instances), num_pairs)
@@ -408,7 +438,9 @@ class TestBoundingBox3DFuser(unittest.TestCase):
     def test_same_rotation_preserved(self):
         """Fusing boxes with identical yaw should preserve that yaw."""
         fuser = BoundingBox3DFuser(
-            iou_threshold=0.3, min_detections=1, confidence_weighting="uniform",
+            iou_threshold=0.3,
+            min_detections=1,
+            confidence_weighting="uniform",
             conf_threshold=0.0,
         )
         yaw = math.pi / 4
@@ -425,7 +457,9 @@ class TestBoundingBox3DFuser(unittest.TestCase):
     def test_180_degree_symmetry(self):
         """Boxes at 0 and pi radians should fuse to ~0 or ~pi, not pi/2."""
         fuser = BoundingBox3DFuser(
-            iou_threshold=0.3, min_detections=1, confidence_weighting="uniform",
+            iou_threshold=0.3,
+            min_detections=1,
+            confidence_weighting="uniform",
             conf_threshold=0.0,
         )
         obbs = [
@@ -437,13 +471,18 @@ class TestBoundingBox3DFuser(unittest.TestCase):
         self.assertEqual(len(instances), 1)
         fused_yaw = _extract_yaw(instances[0].obb)
         min_diff = min(abs(fused_yaw), abs(fused_yaw - math.pi))
-        self.assertLess(min_diff, math.radians(15.0),
-                        f"Fused yaw {fused_yaw:.4f} should be near 0 or pi, not pi/2")
+        self.assertLess(
+            min_diff,
+            math.radians(15.0),
+            f"Fused yaw {fused_yaw:.4f} should be near 0 or pi, not pi/2",
+        )
 
     def test_three_boxes_majority_rotation(self):
         """Three boxes (0, pi, 0) should fuse to ~0 (majority wins)."""
         fuser = BoundingBox3DFuser(
-            iou_threshold=0.3, min_detections=1, confidence_weighting="uniform",
+            iou_threshold=0.3,
+            min_detections=1,
+            confidence_weighting="uniform",
             conf_threshold=0.0,
         )
         obbs = [
@@ -461,7 +500,9 @@ class TestBoundingBox3DFuser(unittest.TestCase):
     def test_fused_position_is_weighted_average(self):
         """Fused position should be the weighted average of inputs."""
         fuser = BoundingBox3DFuser(
-            iou_threshold=0.3, min_detections=1, confidence_weighting="uniform",
+            iou_threshold=0.3,
+            min_detections=1,
+            confidence_weighting="uniform",
             conf_threshold=0.0,
         )
         obbs = [
@@ -487,7 +528,9 @@ class TestBoundingBox3DFuser(unittest.TestCase):
     def test_conf_threshold_filters(self):
         """Detections below conf_threshold should be filtered before fusion."""
         fuser = BoundingBox3DFuser(
-            iou_threshold=0.3, min_detections=1, conf_threshold=0.8,
+            iou_threshold=0.3,
+            min_detections=1,
+            conf_threshold=0.8,
         )
         obbs = [
             _make_test_obb([0.0, 0.0, 0.5], prob=0.5),  # below threshold
@@ -506,12 +549,17 @@ class TestBoundingBox3DFuser(unittest.TestCase):
 class TestYawRoundTrip(unittest.TestCase):
     """Verify yaw -> rotation matrix -> yaw round-trips correctly."""
 
-    @pytest.mark.parametrize("yaw", [0.0, math.pi / 4, math.pi / 2, -math.pi / 4, -math.pi / 2])
+    @pytest.mark.parametrize(
+        "yaw", [0.0, math.pi / 4, math.pi / 2, -math.pi / 4, -math.pi / 2]
+    )
     def test_yaw_roundtrip(self, yaw=None):
         """Create OBB with known yaw and verify it's recoverable."""
         for yaw_val in [0.0, math.pi / 4, math.pi / 2, -math.pi / 4, -math.pi / 2]:
             obb = _make_test_obb([0.0, 0.0, 0.5], yaw=yaw_val)
             extracted = _extract_yaw(obb)
             diff = abs((extracted - yaw_val + math.pi) % (2 * math.pi) - math.pi)
-            self.assertLess(diff, math.radians(1.0),
-                            f"Extracted yaw {extracted:.4f} should match input {yaw_val:.4f}")
+            self.assertLess(
+                diff,
+                math.radians(1.0),
+                f"Extracted yaw {extracted:.4f} should match input {yaw_val:.4f}",
+            )

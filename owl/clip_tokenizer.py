@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Minimal CLIP BPE tokenizer and text embedder. No external dependencies beyond stdlib + torch.
 
@@ -14,7 +18,11 @@ from functools import lru_cache
 import torch
 import torch.nn.functional as F
 
-_CKPT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ckpts", "owlv2-base-patch16-ensemble.pt")
+_CKPT_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "ckpts",
+    "owlv2-base-patch16-ensemble.pt",
+)
 
 
 @lru_cache()
@@ -130,7 +138,9 @@ class CLIPTokenizer:
         text = text.lower().strip()
         tokens = []
         for match in _PAT.finditer(text):
-            token = "".join(self.byte_encoder[b] for b in match.group(0).encode("utf-8"))
+            token = "".join(
+                self.byte_encoder[b] for b in match.group(0).encode("utf-8")
+            )
             bpe_tokens = self._bpe(token).split(" ")
             tokens.extend(self.encoder[t] for t in bpe_tokens)
         return tokens

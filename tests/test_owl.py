@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 
 """
@@ -39,7 +43,10 @@ def _get_wrapper():
     global _shared_wrapper
     if _shared_wrapper is None:
         _shared_wrapper = OwlWrapper(
-            "cpu", text_prompts=["cat", "dog"], min_confidence=0.001, warmup=False,
+            "cpu",
+            text_prompts=["cat", "dog"],
+            min_confidence=0.001,
+            warmup=False,
         )
     return _shared_wrapper
 
@@ -73,7 +80,13 @@ class TestOwlMatchesTransformers(unittest.TestCase):
         my_tok = self.wrapper.tokenizer
 
         labels = load_text_labels("lvisplus")
-        ref = ref_tok(labels, return_tensors="pt", padding="max_length", max_length=16, truncation=True)
+        ref = ref_tok(
+            labels,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=16,
+            truncation=True,
+        )
         mine = my_tok(labels)
 
         self.assertTrue(
@@ -90,7 +103,11 @@ class TestOwlMatchesTransformers(unittest.TestCase):
         prompts = ["a photo of a cat", "chair", "table"]
         ref_tok = self.processor.tokenizer
         ref_inputs = ref_tok(
-            prompts, return_tensors="pt", padding="max_length", max_length=16, truncation=True
+            prompts,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=16,
+            truncation=True,
         )
 
         with torch.no_grad():
@@ -106,7 +123,9 @@ class TestOwlMatchesTransformers(unittest.TestCase):
         self.wrapper.set_text_prompts(["cat", "dog"])
 
         max_diff = (ref_embeds - our_embeds).abs().max().item()
-        self.assertLess(max_diff, 1e-4, f"Text embedding max diff {max_diff:.2e} exceeds tolerance")
+        self.assertLess(
+            max_diff, 1e-4, f"Text embedding max diff {max_diff:.2e} exceeds tolerance"
+        )
 
     def test_vision_logits_match(self):
         """Verify traced vision detector logits match transformers on same preprocessed input."""
@@ -243,12 +262,19 @@ class TestTextEmbedder(unittest.TestCase):
         """Verify TextEmbedder produces same embeddings as OWL checkpoint's text encoder."""
         import io
         import os
-        ckpt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ckpts", "owlv2-base-patch16-ensemble.pt")
+
+        ckpt_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "ckpts",
+            "owlv2-base-patch16-ensemble.pt",
+        )
         if not os.path.exists(ckpt_path):
             self.skipTest("OWL checkpoint not found")
 
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        text_encoder = torch.jit.load(io.BytesIO(checkpoint["text_encoder"]), map_location="cpu")
+        text_encoder = torch.jit.load(
+            io.BytesIO(checkpoint["text_encoder"]), map_location="cpu"
+        )
         text_encoder.eval()
         tokenizer = CLIPTokenizer(
             vocab=checkpoint["tokenizer_vocab"],

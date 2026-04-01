@@ -1,6 +1,6 @@
-# pyre-unsafe
-
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
 
 """
 Data loader for ScanNet scenes with Scan2CAD 3D bounding box annotations.
@@ -109,6 +109,7 @@ class ScanNetLoader(BaseLoader):
         scene_dir = os.path.expanduser(scene_dir)
         if not os.path.isabs(scene_dir) and not os.path.exists(scene_dir):
             from utils.demo_utils import SAMPLE_DATA_PATH
+
             scene_dir = os.path.join(SAMPLE_DATA_PATH, scene_dir)
         self.scene_dir = scene_dir
         self.skip_frames = skip_frames
@@ -345,7 +346,12 @@ class ScanNetLoader(BaseLoader):
 
         # Build pinhole camera (valid_radius = image size for ScanNet)
         cam = self.pinhole_from_K(
-            resizeW, resizeH, fx, fy, cx, cy,
+            resizeW,
+            resizeH,
+            fx,
+            fy,
+            cx,
+            cy,
             valid_radius=(resizeW, resizeH),
         )
         datum["cam0"] = cam.float()
@@ -392,7 +398,11 @@ class ScanNetLoader(BaseLoader):
 
         # Semi-dense points from depth (uniform grid subsampling)
         datum["sdp_w"] = self.sdp_from_depth(
-            depth_np, fx, fy, cx, cy,
+            depth_np,
+            fx,
+            fy,
+            cx,
+            cy,
             T_world_cam[:3, :3].astype(np.float32),
             T_world_cam[:3, 3].astype(np.float32),
         )
@@ -408,6 +418,9 @@ class ScanNetLoader(BaseLoader):
 
         if _debug:
             _t6 = time.perf_counter()
-            print(f"    [loader] imread: {(_t1-_t0)*1000:.1f}ms  to_torch: {(_t2-_t1)*1000:.1f}ms  depth: {(_t3-_t2)*1000:.1f}ms  cam+pose: {(_t4-_t3)*1000:.1f}ms  sdp: {(_t5-_t4)*1000:.1f}ms  total: {(_t6-_t0)*1000:.1f}ms", flush=True)
+            print(
+                f"    [loader] imread: {(_t1 - _t0) * 1000:.1f}ms  to_torch: {(_t2 - _t1) * 1000:.1f}ms  depth: {(_t3 - _t2) * 1000:.1f}ms  cam+pose: {(_t4 - _t3) * 1000:.1f}ms  sdp: {(_t5 - _t4) * 1000:.1f}ms  total: {(_t6 - _t0) * 1000:.1f}ms",
+                flush=True,
+            )
 
         return datum

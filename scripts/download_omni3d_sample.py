@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Create a small sample of the Omni3D SUN-RGBD dataset for testing Boxer.
 
@@ -127,10 +132,14 @@ class RemoteZip:
             comment_len = struct.unpack_from("<H", cd_data, pos + 32)[0]
             local_offset = struct.unpack_from("<I", cd_data, pos + 42)[0]
 
-            name = cd_data[pos + 46 : pos + 46 + name_len].decode("utf-8", errors="replace")
+            name = cd_data[pos + 46 : pos + 46 + name_len].decode(
+                "utf-8", errors="replace"
+            )
 
             # Zip64 extra field
-            if extra_len > 0 and (comp_size == 0xFFFFFFFF or local_offset == 0xFFFFFFFF):
+            if extra_len > 0 and (
+                comp_size == 0xFFFFFFFF or local_offset == 0xFFFFFFFF
+            ):
                 extra = cd_data[pos + 46 + name_len : pos + 46 + name_len + extra_len]
                 epos = 0
                 while epos + 4 <= len(extra):
@@ -236,13 +245,17 @@ def main():
         os.makedirs(args.output_dir, exist_ok=True)
         json_path = os.path.join(args.output_dir, "SUNRGBD_val.json")
 
-        print("SUNRGBD_val.json not found locally, downloading via curl range requests...")
+        print(
+            "SUNRGBD_val.json not found locally, downloading via curl range requests..."
+        )
         rz = RemoteZip(OMNI3D_JSON_URL)
         if rz.open():
             entry = rz.find("SUNRGBD_val.json")
             if entry:
                 comp_size = rz.entries[entry][1]
-                print(f"  Downloading SUNRGBD_val.json ({comp_size / (1024 * 1024):.1f} MB)...")
+                print(
+                    f"  Downloading SUNRGBD_val.json ({comp_size / (1024 * 1024):.1f} MB)..."
+                )
                 if rz.extract(entry, json_path):
                     print(f"  Saved to {json_path}")
                 else:
@@ -286,6 +299,7 @@ def main():
 
     # Select images deterministically
     import random
+
     random.seed(args.seed)
     selected = random.sample(all_images, min(args.num_images, len(all_images)))
     selected_ids = {img["id"] for img in selected}
@@ -315,7 +329,9 @@ def main():
     if not needed:
         print(f"All {len(scene_prefixes)} scenes already downloaded")
     else:
-        print(f"\nDownloading {len(needed)} scenes from SUNRGBD.zip via range requests...")
+        print(
+            f"\nDownloading {len(needed)} scenes from SUNRGBD.zip via range requests..."
+        )
         print(f"  (central directory is ~63 MB, one-time cost)")
 
         rz_sun = RemoteZip(SUNRGBD_ZIP_URL)
@@ -332,10 +348,12 @@ def main():
                 files_to_get.extend(rz_sun.find_all(subdir_prefix))
 
             if not files_to_get:
-                print(f"  [{i+1}/{len(needed)}] Warning: no files found for {prefix}")
+                print(f"  [{i + 1}/{len(needed)}] Warning: no files found for {prefix}")
                 continue
 
-            print(f"  [{i+1}/{len(needed)}] {os.path.basename(prefix)} ({len(files_to_get)} files)")
+            print(
+                f"  [{i + 1}/{len(needed)}] {os.path.basename(prefix)} ({len(files_to_get)} files)"
+            )
             for entry_name in files_to_get:
                 dest = os.path.join(args.output_dir, entry_name)
                 if not os.path.exists(dest):

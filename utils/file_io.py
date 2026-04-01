@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 import csv
 import gzip
 import io
@@ -363,7 +367,6 @@ def load_online_calib(calib_path, vrs_path=None):
         rgb_calibs = None
     timestamps_ns = torch.tensor(timestamps_ns, dtype=torch.long)
     return slaml_calibs, slamr_calibs, rgb_calibs, timestamps_ns
-
 
 
 def load_semidense(
@@ -1202,9 +1205,6 @@ def load_instances_adt(instances_path, return_descriptions=False):
     return result
 
 
-
-
-
 def read_obb_csv(csv_path, force_anything=False):
     with open(csv_path, "r") as f:
         lines = f.readlines()
@@ -1471,8 +1471,10 @@ class ObbCsvWriter2:
 
         # Batch-extract all fields as numpy to avoid per-element tensor ops
         obbs_poses = obb.T_world_object
-        all_q = obbs_poses.q.numpy()       # (N, 4) - vectorized rotation_matrix_to_quaternion
-        all_t = obbs_poses.t.numpy()       # (N, 3)
+        all_q = (
+            obbs_poses.q.numpy()
+        )  # (N, 4) - vectorized rotation_matrix_to_quaternion
+        all_t = obbs_poses.t.numpy()  # (N, 3)
         obbs_dims = obb.bb3_diagonal.numpy()  # (N, 3)
         obb_sems = obb.sem_id.squeeze(-1).numpy()
         obb_inst = obb.inst_id.squeeze(-1).numpy()
@@ -1483,7 +1485,12 @@ class ObbCsvWriter2:
         names = []
         for i in range(N):
             # Decode bytes to string, strip null padding and whitespace
-            raw = bytes(text_bytes[i]).rstrip(b"\x00").decode("ascii", errors="replace").strip()
+            raw = (
+                bytes(text_bytes[i])
+                .rstrip(b"\x00")
+                .decode("ascii", errors="replace")
+                .strip()
+            )
             if raw == "":
                 if sem_id_to_name and obb_sems[i] in sem_id_to_name:
                     raw = sem_id_to_name[obb_sems[i]]
@@ -1494,9 +1501,9 @@ class ObbCsvWriter2:
         # Build all rows at once
         lines = []
         for i in range(N):
-            txyz = f"{all_t[i,0]},{all_t[i,1]},{all_t[i,2]}"
-            qwxyz = f"{all_q[i,0]},{all_q[i,1]},{all_q[i,2]},{all_q[i,3]}"
-            sxyz = f"{obbs_dims[i,0]},{obbs_dims[i,1]},{obbs_dims[i,2]}"
+            txyz = f"{all_t[i, 0]},{all_t[i, 1]},{all_t[i, 2]}"
+            qwxyz = f"{all_q[i, 0]},{all_q[i, 1]},{all_q[i, 2]},{all_q[i, 3]}"
+            sxyz = f"{obbs_dims[i, 0]},{obbs_dims[i, 1]},{obbs_dims[i, 2]}"
             lines.append(
                 f"{time_ns},{txyz},{qwxyz},{sxyz},{names[i]},{obb_inst[i]},{obb_sems[i]},{obb_prob[i]}\n"
             )

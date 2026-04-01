@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Download a sample CA-1M sequence for use with Boxer.
 
@@ -30,7 +35,9 @@ import tarfile
 import tempfile
 import urllib.request
 
-CA1M_URL = "https://ml-site.cdn-apple.com/datasets/ca1m/{split}/ca1m-{split}-{video_id}.tar"
+CA1M_URL = (
+    "https://ml-site.cdn-apple.com/datasets/ca1m/{split}/ca1m-{split}-{video_id}.tar"
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_OUTPUT_DIR = os.path.join(REPO_ROOT, "sample_data")
@@ -58,8 +65,12 @@ def download_file(url: str, dest: str) -> None:
 
 def verify_extracted(data_dir: str) -> bool:
     """Check that the extracted directory has the expected CA-1M structure."""
-    world_files = glob.glob(os.path.join(data_dir, "**/world.gt/instances.json"), recursive=True)
-    image_files = glob.glob(os.path.join(data_dir, "**/*.wide/image.png"), recursive=True)
+    world_files = glob.glob(
+        os.path.join(data_dir, "**/world.gt/instances.json"), recursive=True
+    )
+    image_files = glob.glob(
+        os.path.join(data_dir, "**/*.wide/image.png"), recursive=True
+    )
     has_world = len(world_files) > 0
     has_images = len(image_files) > 0
     if has_world:
@@ -105,7 +116,9 @@ def main():
 
     # Check if already extracted
     if os.path.isdir(seq_dir) and not args.force:
-        world_files = glob.glob(os.path.join(seq_dir, "**/world.gt/instances.json"), recursive=True)
+        world_files = glob.glob(
+            os.path.join(seq_dir, "**/world.gt/instances.json"), recursive=True
+        )
         if world_files:
             print(f"Already downloaded and extracted: {seq_dir}")
             print("Use --force to re-download.")
@@ -127,7 +140,9 @@ def main():
             if e.code == 404:
                 print(f"\nVideo '{args.video_id}' not found in {args.split} split.")
                 print("Check the video ID and split. Valid IDs can be found in:")
-                print("  https://github.com/apple/ml-cubifyanything (data/val.txt, data/train.txt)")
+                print(
+                    "  https://github.com/apple/ml-cubifyanything (data/val.txt, data/train.txt)"
+                )
                 sys.exit(1)
             else:
                 print(f"\nDownload failed (HTTP {e.code}): {e.reason}")

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Download a sample ScanNet scene for use with Boxer.
 
@@ -136,9 +141,7 @@ def main():
         except urllib.error.HTTPError as e:
             if e.code == 403 or e.code == 401:
                 print(f"\nAccess denied (HTTP {e.code}).")
-                print(
-                    "The scannet_frames_25k subset may require authentication."
-                )
+                print("The scannet_frames_25k subset may require authentication.")
                 print("\nTo download ScanNet data manually:")
                 print("1. Visit https://github.com/ScanNet/ScanNet")
                 print(
@@ -152,9 +155,7 @@ def main():
                 sys.exit(1)
             elif e.code == 404:
                 print(f"\nScene '{args.scene}' not found in scannet_frames_25k.")
-                print(
-                    "This subset contains ~25k frames from select ScanNet scenes."
-                )
+                print("This subset contains ~25k frames from select ScanNet scenes.")
                 print(f"Try a different scene ID, or download the full dataset from:")
                 print("  https://github.com/ScanNet/ScanNet")
                 sys.exit(1)

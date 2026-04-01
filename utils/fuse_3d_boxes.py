@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-ignore-all-errors
 
 """
@@ -191,12 +196,19 @@ def _load_cached_text_embeddings():
         Dict mapping text string -> embedding tensor, or None if no cache found.
     """
     import glob as glob_mod
-    ckpts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ckpts")
+
+    ckpts_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ckpts"
+    )
     cache_files = glob_mod.glob(os.path.join(ckpts_dir, "owlv2-*_textemb_*.pt"))
     if not cache_files:
         return None
     cached = torch.load(cache_files[0], map_location="cpu", weights_only=False)
-    if not isinstance(cached, dict) or "prompts" not in cached or "embeddings" not in cached:
+    if (
+        not isinstance(cached, dict)
+        or "prompts" not in cached
+        or "embeddings" not in cached
+    ):
         return None
     prompts = cached["prompts"]
     embeddings = cached["embeddings"]
@@ -246,10 +258,13 @@ def precompute_semantic_embeddings(
             text_indices_tensor = torch.tensor(text_indices, dtype=torch.long)
             return unique_embeddings[text_indices_tensor]
         else:
-            print(f"  Cache miss for {len(missing)} texts, falling back to TextEmbedder")
+            print(
+                f"  Cache miss for {len(missing)} texts, falling back to TextEmbedder"
+            )
 
     # Fallback: load TextEmbedder (loads 881MB checkpoint)
     from owl.clip_tokenizer import TextEmbedder
+
     model = TextEmbedder()
     unique_embeddings = model.forward(unique_texts)
     text_indices_tensor = torch.tensor(text_indices, dtype=torch.long)
@@ -524,7 +539,7 @@ class BoundingBox3DFuser:
                 combined_matrix = iou_matrix
 
             # Find edges from adjacency
-            adj_np = (combined_matrix.cpu().numpy() >= self.iou_threshold)
+            adj_np = combined_matrix.cpu().numpy() >= self.iou_threshold
             rows, cols = adj_np.nonzero()
             for r, c in zip(rows, cols):
                 edges.append((int(r), int(c)))
@@ -831,6 +846,7 @@ class BoundingBox3DFuser:
             Filtered list of instances after NMS
         """
         return apply_nms_to_fused_instances(instances, self.nms_iou_threshold)
+
 
 def apply_nms_to_fused_instances(
     instances: list[FusedInstance],

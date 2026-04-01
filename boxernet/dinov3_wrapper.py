@@ -1,7 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# This software may be used and distributed in accordance with
-# the terms of the DINOv3 License Agreement.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import annotations
 
@@ -1210,9 +1209,7 @@ def _make_dinov3_vit(
                 url, map_location="cpu", check_hash=check_hash
             )
         else:
-            raise FileNotFoundError(
-                f"DINOv3 weights not found: {url}"
-            )
+            raise FileNotFoundError(f"DINOv3 weights not found: {url}")
         model.load_state_dict(state_dict, strict=True)
     else:
         model.init_weights()
@@ -1552,8 +1549,12 @@ class DinoV3Wrapper(torch.nn.Module):
         std = (0.229, 0.224, 0.225)
 
         with torch.inference_mode():
-            mean_t = torch.tensor(mean, device=img.device, dtype=img.dtype).view(1, 3, 1, 1)
-            std_t = torch.tensor(std, device=img.device, dtype=img.dtype).view(1, 3, 1, 1)
+            mean_t = torch.tensor(mean, device=img.device, dtype=img.dtype).view(
+                1, 3, 1, 1
+            )
+            std_t = torch.tensor(std, device=img.device, dtype=img.dtype).view(
+                1, 3, 1, 1
+            )
             img_norm = (img - mean_t) / std_t
             feats = self.model.get_intermediate_layers(
                 img_norm,

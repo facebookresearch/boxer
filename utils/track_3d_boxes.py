@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-ignore-all-errors
 
 """
@@ -236,6 +241,7 @@ class BoundingBox3DTracker:
 
             # Hungarian assignment
             from utils.fuse_3d_boxes import linear_sum_assignment
+
             row_ind, col_ind = linear_sum_assignment(cost_matrix)
             t_hungarian = time.perf_counter()
 
@@ -340,7 +346,9 @@ class BoundingBox3DTracker:
                     raise ImportError("condense_text module not available")
 
                 self._embed_model = TextEmbedder()
-            self._embedding_cache[text] = self._embed_model.forward([text])[0]  # (embed_dim,)
+            self._embedding_cache[text] = self._embed_model.forward([text])[
+                0
+            ]  # (embed_dim,)
         return self._embedding_cache[text]
 
     def _update_track(
@@ -914,5 +922,3 @@ class BoundingBox3DTracker:
         """Reset tracker state."""
         self.tracks = []
         self._next_id = 0
-
-

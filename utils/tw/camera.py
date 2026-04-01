@@ -1,3 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# LICENSE file in the root directory of this source tree.
+
 # pyre-unsafe
 from typing import Optional, Tuple, Union
 
@@ -767,6 +771,7 @@ def vignette_image(cam="rgb"):
         raise NotImplementedError(f"{cam} does not have a vignette image")
 
     import os
+
     calib_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "calibration"
     )
@@ -1096,7 +1101,9 @@ class DistortionHandler:
         assert p2s.size(0) == self.B and p2s.size(1) == self.T
         p2s = p2s.flatten(0, 1)
         res = self.cam_flattened.project(self.linUnproject(p2s))
-        return res[0].unflatten(0, (self.B, self.T)), res[1].unflatten(0, (self.B, self.T))
+        return res[0].unflatten(0, (self.B, self.T)), res[1].unflatten(
+            0, (self.B, self.T)
+        )
 
     def linearize(self, p2s):
         """
@@ -1104,7 +1111,9 @@ class DistortionHandler:
         """
         assert p2s.size(0) == self.B and p2s.size(1) == self.T
         p2s = p2s.flatten(0, 1)
-        return self.linProject(self.cam_flattened.unproject(p2s)[0]).unflatten(0, (self.B, self.T))
+        return self.linProject(self.cam_flattened.unproject(p2s)[0]).unflatten(
+            0, (self.B, self.T)
+        )
 
 
 # ---------------------------------------------------------------------------
