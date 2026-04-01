@@ -570,7 +570,7 @@ class CameraTW(TensorWrapper):
 
     @autocast
     def project(
-        self, p3d: torch.Tensor, fov_deg: float = 120.0, suppress_warning: bool = False
+        self, p3d: torch.Tensor, fov_deg: float = 140.0, suppress_warning: bool = False
     ) -> Tuple[torch.Tensor]:
         """Transform 3D points into 2D pixel coordinates."""
 

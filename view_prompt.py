@@ -31,8 +31,8 @@ from utils.tw.pose import PoseTW
 from utils.tw.tensor_utils import find_nearest2
 from utils.demo_utils import CKPT_PATH
 from utils.image import render_depth_patches
-from utils.orbit_viewer import scale_factor
-from utils.viewer import (
+from utils.viewer_3d import scale_factor
+from utils.viewer_3d import (
     add_common_args,
     build_seq_ctx,
     launch_viewer,
@@ -66,7 +66,7 @@ def main():
     # fmt: off
     parser = argparse.ArgumentParser(description="Interactive 2D BB prompting with BoxerNet")
     add_common_args(parser)
-    parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "bxr_alln2nw12bs12hw960in2x6d768ni1_Nov20.ckpt"), help="BoxerNet checkpoint")
+    parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "boxernet_hw960in2x6d768.ckpt"), help="BoxerNet checkpoint")
     parser.add_argument("--precision", type=str, default="float32", choices=["float32", "bfloat16"])
     parser.add_argument("--force_cpu", action="store_true")
     # fmt: on
@@ -229,6 +229,23 @@ def main():
 
         def _load_sdp_point_cloud(self):
             """Load semi-dense points into a GPU point cloud VBO."""
+            # Try sdp_global first (ca1m, scannet)
+            sdp_global = seq_ctx.get("sdp_global", None)
+            if sdp_global is not None and len(sdp_global) > 0:
+                positions = sdp_global.astype(np.float32) if isinstance(sdp_global, np.ndarray) else sdp_global.numpy().astype(np.float32)
+                P = len(positions)
+                self._sdp_positions = positions
+                colors = np.full((P, 3), 0.25, dtype=np.float32)
+                vertex_data = np.hstack([positions, colors]).astype(np.float32)
+                self._sdp_point_vbo = self.ctx.buffer(vertex_data.tobytes())
+                self._sdp_point_vao = self.ctx.vertex_array(
+                    self.point_prog,
+                    [(self._sdp_point_vbo, "3f 3f", "in_position", "in_color")],
+                )
+                self._sdp_point_count = P
+                print(f"Loaded {P} global semidense points as point cloud")
+                return
+
             uid_to_p3 = seq_ctx.get("uid_to_p3", None)
             if uid_to_p3 is None or not uid_to_p3:
                 # For omni3d: load per-frame SDP for the first frame
@@ -668,7 +685,6 @@ def main():
 
             H, W = img_np.shape[:2]
             rotated = not self._vrs_is_nebula
-
             # Run OWL 2D detection
             owl.set_text_prompts([self._owl_text])
             img_torch_255 = (
@@ -841,6 +857,17 @@ def main():
                 datum = self._loader.load(idx)
                 img_t = datum["img0"][0].permute(1, 2, 0).cpu().numpy()
                 return np.clip(img_t * 255.0, 0, 255).astype(np.uint8)
+            elif (
+                getattr(self, "_data_source", None) == "ca1m"
+                and self._loader is not None
+            ):
+                idx = int(find_nearest2(self._rgb_timestamps, ts_ns))
+                tag = self._loader.image_tags[idx]
+                img_path = os.path.join(self._loader.data_dir, tag + ".wide", "image.png")
+                img = cv2.imread(img_path)
+                if img is not None:
+                    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                return None
             elif getattr(self, "_rgb_images", None) is not None:
                 idx = int(find_nearest2(self._rgb_timestamps, ts_ns))
                 img = self._rgb_images[idx]

@@ -7,8 +7,8 @@ import argparse
 import os
 
 import torch
-from utils.viewer import launch_viewer, resolve_input, subsample_timed_obbs, OBBViewer
-from utils.orbit_viewer import scale_factor
+from utils.viewer_3d import launch_viewer, resolve_input, subsample_timed_obbs, OBBViewer
+from utils.viewer_3d import scale_factor
 from utils.file_io import read_obb_csv
 from utils.demo_utils import EVAL_PATH
 from utils.demo_utils import DEFAULT_SEQ

@@ -5,113 +5,124 @@ This repo contains the code and pre-trained model needed to run Boxer on a varie
 
 ![Boxer System Architecture](assets/boxer_system.jpg)
 
-We provide examples for running on a variety of data sources:
+In this repo, we provide examples for running on a variety of sample data sources:
 * Project Aria (Gen 1)
 * Project Aria (Gen 2)
 * CA-1M
 * ScanNet
 * SUN-RGBD (single view)
 
-# Input Requirements
-
-For single image lifting with BoxerNet, we require an image, intrinsics calibration (we tested with both Pinhole and Fisheye624 camera models), and the gravity direction. Depth is optional but improves performance significantly.
-
-For lifting a video sequence we need the same as above, but needs the full 6 DoF pose (as opposed to simply the gravity direction) to lift the 3DBBs into the world coordinate frame.
-
-# BoxerNet
-
-See [boxernet/README.md](boxernet/README.md) for architecture details.
-
 
 ## Installation
+
+We tested on MacOS (with mps acceleration) and Fedora (with CUDA acceleration).
 
 ```bash
 conda create -n boxer python=3.12
 conda activate boxer
 
-pip install 'numpy>=1.24' 'torch>=2.0' 'opencv-python>=4.8' tqdm
+# Core dependencies for running Boxer
+pip install numpy opencv-python tqdm 'torch>=2.0' 
 
-# ffmpeg (required for video output)
-# macOS: brew install ffmpeg
-# Ubuntu: sudo apt install ffmpeg
-
-# Aria data (optional, for Project Aria sequences)
+# To support Project Aria loading
 pip install projectaria-tools
 
-# 3D interactive viewer (optional, for --viz_3d)
+# 3D interactive viewer for view_*.py scripts
 pip install moderngl moderngl-window imgui[glfw] pyrr
-
 ```
 
-### Model Checkpoint
+### Download Model Checkpoints
 
-Download the checkpoints and place them in the `ckpts/` directory:
+We host model checkpoints for BoxerNet, DinoV3 and OWLv2 on [HuggingFace](https://huggingface.co/facebook/boxer). Download them to the `ckpts/` directory:
 
 ```bash
-mkdir -p ckpts
-# Place checkpoint files:
-# ckpts/bxr_alln2nw12bs12hw960in2x6d768ni1_Nov20.ckpt
-# ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
-# ckpts/owlv2-base-patch16-ensemble.pt
+bash scripts/download_ckpts.sh
 ```
 
-### Sample Data
+### Download Aria Data
 
-The repo includes sample sequences in `sample_data/` for Aria (`sor01`, `hohen`), CA-1M, and ScanNet. Helper scripts are provided to set up additional data:
+We host three sample [Project Aria](https://www.projectaria.com/) sequences on [HuggingFace](https://huggingface.co/datasets/facebook/boxer):
 
 ```bash
-# ScanNet: download a sample scene using the official scannet_frames_25k subset
-python scripts/download_scannet_sample.py
+# Download all three sequences (hohen_gen1, nym10_gen1, cook0_gen2)
+bash scripts/download_aria_data.sh
 
+# Or download a single sequence
+bash scripts/download_aria_data.sh hohen_gen1
+```
+
+### Confirm BoxerNet runs in headless mode on the first 10 images
+```bash
+python run_boxer.py --input hohen_gen1 --max_n=10 --skip_viz
+```
+
+### BoxerNet Interactive Demo on Aria Data
+This demo allows you to create 2DBB prompts and enter text to prompt OWL to detect objects. Run it like:
+```bash
+python view_prompt.py --input hohen_gen1
+```
+
+
+### Download Other Data
+
+We provide helper scripts to set up additional data sources:
+
+```bash
 # Omni3D SUN-RGBD: extract 20 sample images from your local SUNRGBD data
 python scripts/download_omni3d_sample.py
 
 # CA-1M: extract a sample sequence from your local CA-1M data
 python scripts/download_ca1m_sample.py
+
+# ScanNet: manually download from https://github.com/scannet/scannet
+# then place the scene directory in sample_data/, e.g. sample_data/scene0707_00
 ```
 
-Note: ScanNet data is subject to the [ScanNet Terms of Use](http://kaldir.vc.in.tum.de/scannet/ScanNet_TOS.pdf).
-For the full dataset, request access at [github.com/ScanNet/ScanNet](https://github.com/ScanNet/ScanNet).
-For ground-truth 3D box annotations, see [Scan2CAD](https://github.com/skanti/Scan2CAD).
+## Adding Additional Datasets
+
+For the minimal single image lifting with BoxerNet, we require
+* image
+* intrinsics calibration (we tested with both Pinhole and Fisheye624 camera models)
+* the 3D gravity direction
+* Depth is optional but improves performance significantly
+
+For lifting a video sequence we need the same as above plus:
+* full 6 DoF pose for each image
 
 ## Usage
 
 The pipeline supports optional **online 3D tracking** (`--track`) for temporal consistency and **offline 3D fusion** (`--fuse`) for merging detections across frames after all detections have been made.
 
 ```bash
-
-# Basic: run on a sample Aria sequence (place data in sample_data/)
-python run_boxer.py --input sor01
+# Run on a sample Aria sequence
+python run_boxer.py --input hohen_gen1
 
 # Disable visualization (faster, just writes CSV)
-python run_boxer.py --input sor01 --skip_viz
+python run_boxer.py --input hohen_gen1 --skip_viz
 
 # Custom text prompts
-python run_boxer.py --input sor01 --labels=chair,table,lamp
+python run_boxer.py --input hohen_gen1 --labels=chair,table,lamp
 
-# Run with online 3D tracking (adds a third visualization panel)
-python run_boxer.py --input sor01 --track
+# Run with online 3D tracking
+python run_boxer.py --input hohen_gen1 --track
 
 # Run with post-hoc 3D box fusion
-python run_boxer.py --input sor01 --fuse
+python run_boxer.py --input hohen_gen1 --fuse
 
 # ScanNet sequence
 python run_boxer.py --input scene0084_02
 
 # CA-1M sequence
-python run_boxer.py --input ca1m-val-45261179
+python run_boxer.py --input ca1m-val-42898570
 
 # Omni3D dataset
 python run_boxer.py --input SUNRGBD
 
 # Adjust thresholds
-python run_boxer.py --input /path/to/sequence --thresh2d 0.3 --thresh3d 0.6
-
-# Aria sequence from sample_data/
-python run_boxer.py --input hohen
+python run_boxer.py --input hohen_gen1 --thresh2d 0.3 --thresh3d 0.6
 
 # Use bfloat16 for faster inference on supported GPUs
-python run_boxer.py --input /path/to/sequence --precision bfloat16
+python run_boxer.py --input hohen_gen1 --precision bfloat16
 ```
 
 ### Outputs
@@ -148,46 +159,44 @@ Results are written to `output/<sequence_name>/`:
 
 ```
 boxer/
-├── run_boxer.py              # Main entry point
+├── run_boxer.py              # Main entry point (headless detection + lifting)
+├── view_prompt.py            # Interactive demo (2D prompts + OWL text detection)
+├── view_fusion.py            # View pre-computed 3D bounding boxes
 ├── boxernet/
 │   ├── boxernet.py           # BoxerNet model (encode → cross-attend → predict)
 │   └── dinov3_wrapper.py     # DINOv3 backbone wrapper
 ├── owl/
-│   ├── owl_wrapper.py        # OWLv2 open-vocabulary detector (JIT-traced, no transformers needed)
+│   ├── owl_wrapper.py        # OWLv2 open-vocabulary detector
 │   └── clip_tokenizer.py     # CLIP BPE tokenizer + text embedder
 ├── loaders/
 │   ├── base_loader.py        # Base loader interface
-│   ├── aria_loader.py        # Aria glasses data loader
+│   ├── aria_loader.py        # Project Aria data loader
 │   ├── ca_loader.py          # CA-1M dataset loader
 │   ├── omni_loader.py        # Omni3D dataset loader
 │   └── scannet_loader.py     # ScanNet dataset loader
 ├── scripts/
-│   ├── download_scannet_sample.py   # Download ScanNet sample data
+│   ├── download_ckpts.sh     # Download model checkpoints
+│   ├── download_aria_data.sh # Download sample Aria sequences
+│   ├── download_ca1m_sample.py      # Extract CA-1M sample data
 │   ├── download_omni3d_sample.py    # Extract Omni3D SUN-RGBD sample
-│   └── download_ca1m_sample.py      # Extract CA-1M sample data
+│   └── download_scannet_sample.py   # Download ScanNet sample data
 ├── tests/                    # Unit tests (see tests/README.md)
-├── tw/                       # TensorWrapper types (see tw/README.md)
-│   ├── tensor_wrapper.py     # TensorWrapper base class
-│   ├── camera.py             # CameraTW: camera intrinsics + projection
-│   ├── obb.py                # ObbTW tensor wrapper + IoU computation
-│   ├── pose.py               # PoseTW: SE(3) poses + quaternion math
-│   └── tensor_utils.py       # String/tensor conversions, array helpers
 └── utils/
+    ├── viewer_3d.py          # Interactive 3D visualization + viewer classes
+    ├── tw/                   # TensorWrapper types (see utils/tw/README.md)
+    │   ├── tensor_wrapper.py # TensorWrapper base class
+    │   ├── camera.py         # CameraTW: camera intrinsics + projection
+    │   ├── obb.py            # ObbTW tensor wrapper + IoU computation
+    │   └── pose.py           # PoseTW: SE(3) poses + quaternion math
     ├── fuse_3d_boxes.py      # 3D box fusion + Hungarian algorithm
     ├── track_3d_boxes.py     # Online 3D bounding box tracker
     ├── file_io.py            # CSV I/O for OBBs and calibration
     ├── image.py              # Image utilities + 3D/2D box rendering
-    ├── viewer.py             # Interactive 3D visualization
-    ├── orbit_viewer.py       # Orbit-based 3D viewer
     ├── gravity.py            # Gravity alignment utilities
     ├── taxonomy.py           # Label taxonomy definitions
     ├── demo_utils.py         # Demo helpers, paths, timing
     └── video.py              # Video I/O utilities
 ```
-
-## Tests
-
-See [tests/README.md](tests/README.md) for setup, running, and coverage details.
 
 ## FAQ
 
@@ -195,8 +204,10 @@ Q: Can I run it on an arbitrary image without any other info?
 A: Theoretically yes, but you would need to estimate the intrinsics and gravity direction. We didn't test that.
 
 Q: Do you plan to release the training or evaluation code?
-A: No, we do not, because that would require more long term maintenance from the authors. You can email the first author or leave a github issue if you have any questions about re-implementing these.
+A: No, we do not, because that would require more long term maintenance from the authors. You can email the first author or leave a github issue if you have any questions about re-implementing these, but our response may be slow.
 
+Q: Does it work on a Windows machine?
+A: We did not test it, but running the core model should work.
 
 
 ## License

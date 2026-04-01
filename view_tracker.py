@@ -6,8 +6,8 @@
 import argparse
 import os
 
-from utils.orbit_viewer import scale_factor
-from utils.viewer import (
+from utils.viewer_3d import scale_factor
+from utils.viewer_3d import (
     add_common_args,
     build_seq_ctx,
     launch_viewer,

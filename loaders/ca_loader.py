@@ -170,6 +170,85 @@ class CALoader(BaseLoader):
         self.cams = torch.stack(cams)
         self.sdp_ws = torch.stack(sdp_ws)
 
+    def load_metadata(self, sdp_fps=1.0):
+        """Load only poses, cameras, and a global SDP cloud (no images/OBBs).
+
+        Much faster than load_all() — suitable for interactive viewers that
+        load images on demand.
+
+        Args:
+            sdp_fps: Target FPS for SDP sampling (default 1.0).
+        """
+        from tqdm import tqdm
+
+        Ts_wc = []
+        cams = []
+        for tag in tqdm(self.image_tags, desc="Loading metadata"):
+            data_dir = self.data_dir
+            # Load camera extrinsics
+            RT = torch.tensor(
+                _read_json(os.path.join(data_dir, tag + ".gt", "RT.json"))
+            )
+            T_wc = PoseTW.from_Rt(RT[:3, :3], RT[:3, 3])
+            Ts_wc.append(T_wc)
+            # Load camera intrinsics
+            K = torch.tensor(
+                _read_json(os.path.join(data_dir, tag + ".wide", "image", "K.json"))
+            )
+            # Need image size for camera — read just the header
+            img_path = os.path.join(data_dir, tag + ".wide", "image.png")
+            with Image.open(img_path) as im:
+                W, H = im.size
+            params = torch.tensor(
+                [K[0, 0], K[1, 1], K[0, 2], K[1, 2]], dtype=torch.float32
+            )
+            cam = CameraTW.from_surreal(
+                width=W, height=H, type_str="pinhole", params=params
+            )
+            cams.append(cam)
+
+        self.Ts_wc = torch.stack(Ts_wc)
+        self.cams = torch.stack(cams)
+
+        # Build global SDP from a subset of frames at ~sdp_fps
+        timestamps_s = self.timestamp_ns.float() / 1e9
+        dt = 1.0 / sdp_fps
+        sdp_chunks = []
+        last_sdp_time = -float("inf")
+        for i, tag in enumerate(self.image_tags):
+            t = timestamps_s[i].item()
+            if t - last_sdp_time < dt:
+                continue
+            last_sdp_time = t
+            data_dir = self.data_dir
+            RT = torch.tensor(
+                _read_json(os.path.join(data_dir, tag + ".gt", "RT.json"))
+            )
+            K = torch.tensor(
+                _read_json(os.path.join(data_dir, tag + ".wide", "image", "K.json"))
+            )
+            depth_raw = np.array(
+                Image.open(os.path.join(data_dir, tag + ".wide", "depth.png"))
+            )
+            img_path = os.path.join(data_dir, tag + ".wide", "image.png")
+            with Image.open(img_path) as im:
+                W, H = im.size
+            depth_resize = cv2.resize(depth_raw, (W, H), interpolation=cv2.INTER_NEAREST)
+            depth_m = depth_resize.astype(np.float32) / 1000.0
+            R_wc = RT[:3, :3].numpy().astype(np.float32)
+            t_wc = RT[:3, 3].numpy().astype(np.float32)
+            sdp_w = self.sdp_from_depth(
+                depth_m, K[0, 0].item(), K[1, 1].item(),
+                K[0, 2].item(), K[1, 2].item(), R_wc, t_wc, self.num_samples
+            )
+            if len(sdp_w) > 0:
+                sdp_chunks.append(sdp_w)
+        if sdp_chunks:
+            self.sdp_global = torch.cat(sdp_chunks, dim=0)
+        else:
+            self.sdp_global = torch.zeros(0, 3)
+        print(f"Built global SDP: {len(self.sdp_global)} points from {len(sdp_chunks)} frames")
+
     def _load_frame(self, image_tag):
         """Load all data for a single frame from disk."""
         data_dir = self.data_dir
@@ -223,7 +302,10 @@ class CALoader(BaseLoader):
                 continue
             inst_id = self.id2inst[id_]
             visible_obbs.append(self.all_obbs[inst_id].clone())
-        visible_obbs = ObbTW.stack(visible_obbs).add_padding(512)
+        if len(visible_obbs) > 0:
+            visible_obbs = ObbTW.stack(visible_obbs).add_padding(512)
+        else:
+            visible_obbs = ObbTW(torch.zeros(0, 165))
 
         return {
             "image": image,
