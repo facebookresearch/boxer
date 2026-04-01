@@ -31,7 +31,7 @@ pip install projectaria-tools
 pip install moderngl moderngl-window imgui[glfw]
 ```
 
-### Download Model Checkpoints
+## Download Model Checkpoints
 
 We host model checkpoints for BoxerNet, DinoV3 and OWLv2 on [HuggingFace](https://huggingface.co/facebook/boxer). Download them to the `ckpts/` directory:
 
@@ -41,7 +41,7 @@ bash scripts/download_ckpts.sh
 
 ## Download Sample Aria Data
 
-We host three sample [Project Aria](https://www.projectaria.com/) sequences on [HuggingFace](https://huggingface.co/datasets/facebook/boxer):
+We host three sample [Project Aria](https://www.projectaria.com/) sequences on [HuggingFace](https://huggingface.co/datasets/facebook/boxer). Download them to the `sample_data/` directory:
 
 ```bash
 # Download all three sequences (hohen_gen1, nym10_gen1, cook0_gen2)
@@ -49,14 +49,14 @@ bash scripts/download_aria_data.sh
 ```
 
 ## Demo #1: Run BoxerNet in headless mode
-For this first demo, you do not need to have a display. This will run BoxerNet on the first 10 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset.
+For this first demo, you do not need to have a display, so it will work if you are SSH'ed into a server. This will run BoxerNet on the first 10 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset.
 
 ```bash
 python run_boxer.py --input nym10_gen1 --max_n=10 --skip_viz
 ```
 
 ## Demo #2: BoxerNet Interactive Demo on Aria Data
-This demo allows you to create 2DBB prompts and enter text to prompt OWL to detect objects. Run it like:
+For this demo, you need to have a valid display to have the GUI work. This demo allows you to create 2DBB prompts and enter text to prompt OWL to detect objects. Run it like:
 ```bash
 python view_prompt.py --input nym10_gen1
 ```

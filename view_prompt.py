@@ -617,7 +617,7 @@ def main():
                         outputs = boxernet.forward(datum)
                 obb_pr_w = outputs["obbs_pr_w"].cpu()[0]
                 dt_ms = (time.perf_counter() - t0) * 1000
-                timing = f"(forward took: {dt_ms:.0f}ms, {device}, {args.precision})"
+                timing = f"(forward took: {dt_ms:.0f}ms, {device}, {precision_dtype})"
 
                 if len(obb_pr_w) > 0:
                     obb = obb_pr_w[0]
