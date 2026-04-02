@@ -4103,9 +4103,9 @@ class TrackerViewer(SequenceOBBViewer):
         self.obs_point_vbo = None
         self.obs_point_vao = None
         self.obs_point_count = 0
-        self.obs_inside_vbo = None
-        self.obs_inside_vao = None
-        self.obs_inside_count = 0
+        self.point_inside_vbo = None
+        self.point_inside_vao = None
+        self.point_inside_count = 0
         self._track_obbs_for_pts = None
         self._track_colors_for_pts = None
         self.obs_point_size = 2.0
@@ -4567,6 +4567,58 @@ class TrackerViewer(SequenceOBBViewer):
             )
         )
 
+    def _recolor_global_points_by_tracks(self) -> None:
+        """Color global SDP points by their containing tracked box's color.
+
+        Points inside a tracked box get that box's color and are moved to a
+        separate VBO rendered at 2x point size. Matches view_prompt.py pattern.
+        """
+        if self._point_positions is None:
+            return
+
+        positions = self._point_positions  # (P, 3) numpy
+        P = len(positions)
+        color_val = self.sdp_color_options[self.sdp_color_index]
+        colors = np.full((P, 3), color_val, dtype=np.float32)
+        any_inside = np.zeros(P, dtype=bool)
+
+        if self._track_obbs_for_pts is not None and self._track_colors_for_pts is not None:
+            pts_t = torch.from_numpy(positions).float()
+            for i in range(len(self._track_obbs_for_pts)):
+                obb = self._track_obbs_for_pts[i]
+                inside = obb.points_inside_bb3(pts_t).numpy()
+                colors[inside] = self._track_colors_for_pts[i]
+                any_inside |= inside
+
+        # Outside points -> main VBO
+        outside = ~any_inside
+        n_outside = int(outside.sum())
+        out_data = np.hstack([positions[outside], colors[outside]]).astype(np.float32)
+        self.point_count = n_outside
+
+        if self.point_vbo is not None:
+            self.point_vbo.release()
+        self.point_vbo = self.ctx.buffer(out_data.tobytes())
+        self.point_vao = self.ctx.vertex_array(
+            self.point_prog,
+            [(self.point_vbo, "3f 3f", "in_position", "in_color")],
+        )
+
+        # Inside points -> separate VBO (rendered at 2x size)
+        n_inside = int(any_inside.sum())
+        if n_inside > 0:
+            in_data = np.hstack([positions[any_inside], colors[any_inside]]).astype(np.float32)
+            if self.point_inside_vbo is not None:
+                self.point_inside_vbo.release()
+            self.point_inside_vbo = self.ctx.buffer(in_data.tobytes())
+            self.point_inside_vao = self.ctx.vertex_array(
+                self.point_prog,
+                [(self.point_inside_vbo, "3f 3f", "in_position", "in_color")],
+            )
+            self.point_inside_count = n_inside
+        else:
+            self.point_inside_count = 0
+
     def _get_observed_points(self, ts_ns: int) -> Optional[torch.Tensor]:
         """Return (K, 3) world-space positions of currently observed semidense points."""
         if getattr(self, "_data_source", None) == "scannet":
@@ -4685,7 +4737,6 @@ class TrackerViewer(SequenceOBBViewer):
         )
         if obs_pts is None:
             self.obs_point_count = 0
-            self.obs_inside_count = 0
             if getattr(self, "_data_source", None) == "scannet" and getattr(
                 self, "_scannet_debug_points", True
             ):
@@ -4698,71 +4749,34 @@ class TrackerViewer(SequenceOBBViewer):
             self, "_scannet_debug_points", True
         ):
             print(f"[ScanNet SDP] ts={ts_ns}: uploading observed points K={K}")
-
-        # Default color for points outside any tracked box
+        # Use same color as global points
         if hasattr(self, "sdp_color_options") and hasattr(self, "sdp_color_index"):
             color_val = self.sdp_color_options[self.sdp_color_index]
         else:
+            # Early init fallback (before tracker UI/color state is fully initialized)
             color_val = (0.25, 0.25, 0.25)
         obs_colors = np.tile(np.array(color_val, dtype=np.float32), (K, 1))
+        obs_data = np.hstack([obs_positions, obs_colors]).astype(np.float32)
 
-        # Recolor points inside tracked boxes by each box's color
-        any_inside = np.zeros(K, dtype=bool)
-        if (
-            self._track_obbs_for_pts is not None
-            and self._track_colors_for_pts is not None
+        self.obs_point_count = K
+
+        # Reuse or create buffer
+        data_bytes = obs_data.tobytes()
+        if self.obs_point_vbo is not None and self.obs_point_vbo.size >= len(
+            data_bytes
         ):
-            pts_t = torch.from_numpy(obs_positions).float()
-            for i in range(len(self._track_obbs_for_pts)):
-                obb = self._track_obbs_for_pts[i]
-                inside = obb.points_inside_bb3(pts_t).numpy()
-                obs_colors[inside] = self._track_colors_for_pts[i]
-                any_inside |= inside
-
-        # Outside points -> main VBO
-        outside = ~any_inside
-        n_outside = int(outside.sum())
-        self.obs_point_count = n_outside
-
-        if n_outside > 0:
-            out_data = np.hstack([obs_positions[outside], obs_colors[outside]]).astype(
-                np.float32
-            )
-            data_bytes = out_data.tobytes()
-            if self.obs_point_vbo is not None and self.obs_point_vbo.size >= len(
-                data_bytes
-            ):
-                self.obs_point_vbo.orphan(self.obs_point_vbo.size)
-                self.obs_point_vbo.write(data_bytes)
-            else:
-                if self.obs_point_vbo is not None:
-                    self.obs_point_vbo.release()
-                if self.obs_point_vao is not None:
-                    self.obs_point_vao.release()
-                self.obs_point_vbo = self.ctx.buffer(data_bytes)
-                self.obs_point_vao = self.ctx.vertex_array(
-                    self.point_prog,
-                    [(self.obs_point_vbo, "3f 3f", "in_position", "in_color")],
-                )
-
-        # Inside points -> separate VBO (rendered at 2x size)
-        n_inside = int(any_inside.sum())
-        if n_inside > 0:
-            in_data = np.hstack(
-                [obs_positions[any_inside], obs_colors[any_inside]]
-            ).astype(np.float32)
-            if self.obs_inside_vbo is not None:
-                self.obs_inside_vbo.release()
-            if self.obs_inside_vao is not None:
-                self.obs_inside_vao.release()
-            self.obs_inside_vbo = self.ctx.buffer(in_data.tobytes())
-            self.obs_inside_vao = self.ctx.vertex_array(
-                self.point_prog,
-                [(self.obs_inside_vbo, "3f 3f", "in_position", "in_color")],
-            )
-            self.obs_inside_count = n_inside
+            self.obs_point_vbo.orphan(self.obs_point_vbo.size)
+            self.obs_point_vbo.write(data_bytes)
         else:
-            self.obs_inside_count = 0
+            if self.obs_point_vbo is not None:
+                self.obs_point_vbo.release()
+            if self.obs_point_vao is not None:
+                self.obs_point_vao.release()
+            self.obs_point_vbo = self.ctx.buffer(data_bytes)
+            self.obs_point_vao = self.ctx.vertex_array(
+                self.point_prog,
+                [(self.obs_point_vbo, "3f 3f", "in_position", "in_color")],
+            )
 
     def _step_to_frame(self, target_idx: int) -> None:
         """Advance tracker to the target frame index.
@@ -5473,8 +5487,12 @@ class TrackerViewer(SequenceOBBViewer):
         # Update observed semidense points for this frame.
         # ScanNet currently uses per-frame observed points only (no global cloud),
         # so point_count can remain 0 while observed points are still available.
-        if self.point_count > 0 or getattr(self, "_data_source", None) == "scannet":
+        if self._point_positions is not None or getattr(self, "_data_source", None) == "scannet":
             self._update_observed_points(nav_ts)
+
+        # Recolor global point cloud by tracked box colors
+        if self._point_positions is not None:
+            self._recolor_global_points_by_tracks()
 
         t_end = time_module.perf_counter()
 
@@ -5742,6 +5760,24 @@ class TrackerViewer(SequenceOBBViewer):
             )
             self.point_vao.render(mode=self.ctx.POINTS, vertices=self.point_count)
 
+        # Render global points inside tracked boxes at 2x size
+        if (
+            self.show_global_points
+            and self.point_inside_count > 0
+            and self.point_inside_vao is not None
+        ):
+            self.ctx.enable(self.ctx.PROGRAM_POINT_SIZE)
+            self.point_prog["mvp"].write(mvp_bytes)
+            self.point_prog["point_size"].write(
+                np.array(self.point_size * 2.0, dtype="f4").tobytes()
+            )
+            self.point_prog["alpha"].write(
+                np.array(1.0, dtype="f4").tobytes()
+            )
+            self.point_inside_vao.render(
+                mode=self.ctx.POINTS, vertices=self.point_inside_count
+            )
+
         # Render currently observed points larger (cyan)
         if (
             self.show_obs_points
@@ -5758,24 +5794,6 @@ class TrackerViewer(SequenceOBBViewer):
             )
             self.obs_point_vao.render(
                 mode=self.ctx.POINTS, vertices=self.obs_point_count
-            )
-
-        # Render observed points inside tracked boxes at 2x size
-        if (
-            self.show_obs_points
-            and self.obs_inside_count > 0
-            and self.obs_inside_vao is not None
-        ):
-            self.ctx.enable(self.ctx.PROGRAM_POINT_SIZE)
-            self.point_prog["mvp"].write(mvp_bytes)
-            self.point_prog["point_size"].write(
-                np.array(self.obs_point_size * 2.0, dtype="f4").tobytes()
-            )
-            self.point_prog["alpha"].write(
-                np.array(self.obs_point_alpha, dtype="f4").tobytes()
-            )
-            self.obs_inside_vao.render(
-                mode=self.ctx.POINTS, vertices=self.obs_inside_count
             )
 
         # Restore full viewport for imgui rendering
