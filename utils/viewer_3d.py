@@ -477,7 +477,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import cv2
-import matplotlib.cm as cm
 import moderngl
 import torch
 
@@ -907,6 +906,16 @@ def _track_color_mode_from_name(name: str) -> Optional[int]:
 _verbose_logging = False
 
 
+def _jet_colormap(values: np.ndarray) -> np.ndarray:
+    """Apply jet colormap to float values in [0, 1]. Returns (N, 4) RGBA float32."""
+    v = np.clip(values, 0.0, 1.0).astype(np.float32)
+    u8 = (v * 255).astype(np.uint8).reshape(-1, 1)
+    bgr = cv2.applyColorMap(u8, cv2.COLORMAP_JET).reshape(-1, 3)
+    rgb = bgr[:, ::-1].astype(np.float32) / 255.0
+    alpha = np.ones((len(rgb), 1), dtype=np.float32)
+    return np.hstack([rgb, alpha])
+
+
 def _startup_log(msg: str) -> None:
     if _verbose_logging:
         print(f"[STARTUP] {msg}")
@@ -1329,6 +1338,16 @@ class OBBViewer(OrbitViewer):
         )
         self.fusion_enable_nms = True  # Enable NMS on fused boxes
         self.fusion_nms_iou_threshold = 0.6  # IoU threshold for NMS (>0.7 = redundant)
+
+        # Snapshot defaults for reset button
+        self._default_prob_threshold = self.prob_threshold
+        self._default_fusion_iou_threshold = self.fusion_iou_threshold
+        self._default_fusion_min_detections = self.fusion_min_detections
+        self._default_fusion_confidence_weighting = self.fusion_confidence_weighting
+        self._default_fusion_samp_per_dim = self.fusion_samp_per_dim
+        self._default_fusion_semantic_threshold = self.fusion_semantic_threshold
+        self._default_fusion_enable_nms = self.fusion_enable_nms
+        self._default_fusion_nms_iou_threshold = self.fusion_nms_iou_threshold
 
         # Line rendering parameters
         self.raw_line_width = 2  # Line width for raw detections
@@ -1884,7 +1903,7 @@ class OBBViewer(OrbitViewer):
         else:  # COLOR_MODE_PROBABILITY
             # Use probability-based jet colormap
             probs_np = tracked_all_obbs.prob.cpu().numpy().squeeze()
-            colors_rgba = cm.jet(probs_np)  # (N, 4) RGBA
+            colors_rgba = _jet_colormap(probs_np)  # (N, 4) RGBA
             colors_np = colors_rgba[:, :3]  # (N, 3) RGB
             colors = (
                 torch.from_numpy(colors_np).float().to(tracked_all_obbs.device)
@@ -1988,7 +2007,7 @@ class OBBViewer(OrbitViewer):
         else:  # COLOR_MODE_PROBABILITY
             # Use probability-based jet colormap
             probs_np = probs.cpu().numpy()
-            colors_rgba = cm.jet(probs_np)  # (N, 4) RGBA
+            colors_rgba = _jet_colormap(probs_np)  # (N, 4) RGBA
             colors_np = colors_rgba[:, :3]  # (N, 3) RGB
             colors = torch.from_numpy(colors_np).float().to(corners.device)  # (N, 3)
 
@@ -2535,25 +2554,36 @@ class OBBViewer(OrbitViewer):
             or self._last_fusion_prob_threshold != self.prob_threshold
         )
 
-        button_label = (
-            "RUN FUSION (out of date)" if fusion_out_of_date else "RUN FUSION"
-        )
+        fusion_has_run = self._last_fusion_iou_threshold is not None
+        fusion_up_to_date = fusion_has_run and not fusion_out_of_date
+
         button_width = 400
         button_height = 40
-        if fusion_out_of_date:
-            imgui.push_style_color(imgui.COLOR_BUTTON, 0.7, 0.15, 0.15, 1.0)
-            imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.85, 0.2, 0.2, 1.0)
-            imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 0.5, 0.1, 0.1, 1.0)
-        if imgui.button(button_label, width=button_width, height=button_height):
-            self._run_fusion()
-            if hasattr(self, "_rgb_tracked_all_cache_epoch"):
-                self._rgb_tracked_all_cache_epoch += 1
-                self._rgb_tracked_all_color_cache = None
-                self._rgb_tracked_all_color_mode_cache = None
-            if hasattr(self, "_rebuild_rgb_projections"):
-                self._rebuild_rgb_projections()
-        if fusion_out_of_date:
+        if fusion_up_to_date:
+            button_label = "RUN FUSION (already ran)"
+            imgui.push_style_color(imgui.COLOR_BUTTON, 0.3, 0.3, 0.3, 1.0)
+            imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.3, 0.3, 0.3, 1.0)
+            imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 0.3, 0.3, 0.3, 1.0)
+            imgui.button(button_label, width=button_width, height=button_height)
             imgui.pop_style_color(3)
+        else:
+            if fusion_out_of_date and fusion_has_run:
+                button_label = "RUN FUSION (out of date)"
+                imgui.push_style_color(imgui.COLOR_BUTTON, 0.7, 0.15, 0.15, 1.0)
+                imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.85, 0.2, 0.2, 1.0)
+                imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 0.5, 0.1, 0.1, 1.0)
+            else:
+                button_label = "RUN FUSION"
+            if imgui.button(button_label, width=button_width, height=button_height):
+                self._run_fusion()
+                if hasattr(self, "_rgb_tracked_all_cache_epoch"):
+                    self._rgb_tracked_all_cache_epoch += 1
+                    self._rgb_tracked_all_color_cache = None
+                    self._rgb_tracked_all_color_mode_cache = None
+                if hasattr(self, "_rebuild_rgb_projections"):
+                    self._rebuild_rgb_projections()
+            if fusion_out_of_date and fusion_has_run:
+                imgui.pop_style_color(3)
 
         imgui.separator()
 
@@ -2655,6 +2685,18 @@ class OBBViewer(OrbitViewer):
             imgui.text(f"Fused: {len(valid_instances)} instances")
             total_detections = sum(inst.support_count for inst in valid_instances)
             imgui.text(f"  From: {total_detections} detections")
+
+        imgui.separator()
+        if imgui.button("Reset Defaults", width=200, height=28):
+            self.prob_threshold = self._default_prob_threshold
+            self.fusion_iou_threshold = self._default_fusion_iou_threshold
+            self.fusion_min_detections = self._default_fusion_min_detections
+            self.fusion_confidence_weighting = self._default_fusion_confidence_weighting
+            self.fusion_samp_per_dim = self._default_fusion_samp_per_dim
+            self.fusion_semantic_threshold = self._default_fusion_semantic_threshold
+            self.fusion_enable_nms = self._default_fusion_enable_nms
+            self.fusion_nms_iou_threshold = self._default_fusion_nms_iou_threshold
+            self._cached_filtered_obbs = None
 
     def _render_playback_controls(self) -> None:
         """Render playback controls (play/pause, frame slider, FPS)."""
@@ -3543,7 +3585,7 @@ class SequenceOBBViewer(OBBViewer):
             else:
                 if self.color_mode == COLOR_MODE_PROBABILITY:
                     probs = tracked_all_obbs.prob.squeeze(-1).cpu().numpy()
-                    tracked_all_colors = cm.jet(probs)[:, :3].astype(np.float32)
+                    tracked_all_colors = _jet_colormap(probs)[:, :3].astype(np.float32)
                 elif self.color_mode == COLOR_MODE_RANDOM:
                     tracked_all_colors = (
                         self._obbs_random_colors(tracked_all_obbs)
@@ -4574,53 +4616,60 @@ class TrackerViewer(SequenceOBBViewer):
         )
 
     def _recolor_global_points_by_tracks(self) -> None:
-        """Color global SDP points by their containing tracked box's color.
-
-        Points inside a tracked box get that box's color and are moved to a
-        separate VBO rendered at 2x point size. Matches view_prompt.py pattern.
-        """
-        if self._point_positions is None:
+        """Color global SDP points by their containing tracked box's color."""
+        if self._point_positions is None or self.point_vbo is None:
             return
 
-        positions = self._point_positions  # (P, 3) numpy
-        P = len(positions)
+        P = len(self._point_positions)
+
+        # Cache torch tensor and pre-allocated vertex array (positions never change)
+        if not hasattr(self, "_pts_torch") or self._pts_torch is None:
+            self._pts_torch = torch.from_numpy(self._point_positions).float()
+            self._vertex_buf = np.empty((P, 6), dtype=np.float32)
+            self._vertex_buf[:, :3] = self._point_positions
+
         color_val = self.sdp_color_options[self.sdp_color_index]
-        colors = np.full((P, 3), color_val, dtype=np.float32)
-        any_inside = np.zeros(P, dtype=bool)
+        self._vertex_buf[:, 3:] = color_val
+        any_inside = None
 
         if self._track_obbs_for_pts is not None and self._track_colors_for_pts is not None:
-            pts_t = torch.from_numpy(positions).float()
-            for i in range(len(self._track_obbs_for_pts)):
-                obb = self._track_obbs_for_pts[i]
-                inside = obb.points_inside_bb3(pts_t).numpy()
-                colors[inside] = self._track_colors_for_pts[i]
-                any_inside |= inside
+            M = len(self._track_obbs_for_pts)
+            pts_expanded = self._pts_torch.unsqueeze(0).expand(M, -1, -1)
+            inside_batch = self._track_obbs_for_pts.batch_points_inside_bb3(
+                pts_expanded
+            ).numpy()  # (M, P) bool
+            # Assign colors: later OBBs overwrite earlier ones for overlapping points
+            for i in range(M):
+                mask = inside_batch[i]
+                self._vertex_buf[mask, 3:] = self._track_colors_for_pts[i]
+            any_inside = inside_batch.any(axis=0)
 
-        # Outside points -> main VBO
-        outside = ~any_inside
-        n_outside = int(outside.sum())
-        out_data = np.hstack([positions[outside], colors[outside]]).astype(np.float32)
-        self.point_count = n_outside
+        # Write full vertex data to VBO
+        data_bytes = self._vertex_buf.tobytes()
+        self.point_vbo.orphan(self.point_vbo.size)
+        self.point_vbo.write(data_bytes)
+        self.point_count = P
 
-        if self.point_vbo is not None:
-            self.point_vbo.release()
-        self.point_vbo = self.ctx.buffer(out_data.tobytes())
-        self.point_vao = self.ctx.vertex_array(
-            self.point_prog,
-            [(self.point_vbo, "3f 3f", "in_position", "in_color")],
-        )
-
-        # Inside points -> separate VBO (rendered at 2x size)
-        n_inside = int(any_inside.sum())
+        # Inside points -> separate VBO for 2x rendering
+        if any_inside is not None:
+            n_inside = int(any_inside.sum())
+        else:
+            n_inside = 0
         if n_inside > 0:
-            in_data = np.hstack([positions[any_inside], colors[any_inside]]).astype(np.float32)
-            if self.point_inside_vbo is not None:
-                self.point_inside_vbo.release()
-            self.point_inside_vbo = self.ctx.buffer(in_data.tobytes())
-            self.point_inside_vao = self.ctx.vertex_array(
-                self.point_prog,
-                [(self.point_inside_vbo, "3f 3f", "in_position", "in_color")],
-            )
+            in_bytes = self._vertex_buf[any_inside].tobytes()
+            if self.point_inside_vbo is not None and self.point_inside_vbo.size >= len(
+                in_bytes
+            ):
+                self.point_inside_vbo.orphan(self.point_inside_vbo.size)
+                self.point_inside_vbo.write(in_bytes)
+            else:
+                if self.point_inside_vbo is not None:
+                    self.point_inside_vbo.release()
+                self.point_inside_vbo = self.ctx.buffer(in_bytes)
+                self.point_inside_vao = self.ctx.vertex_array(
+                    self.point_prog,
+                    [(self.point_inside_vbo, "3f 3f", "in_position", "in_color")],
+                )
             self.point_inside_count = n_inside
         else:
             self.point_inside_count = 0
@@ -5322,12 +5371,12 @@ class TrackerViewer(SequenceOBBViewer):
                 shown_track_obbs = torch.stack([t.obb for t in shown_tracks])
                 t_colors = self._obbs_random_colors(shown_track_obbs).cpu()
             else:  # Health (default)
-                health_colors_rgba = cm.jet(np.array(health_scores))[:, :3]  # (M, 3)
+                health_colors_rgba = _jet_colormap(np.array(health_scores))[:, :3]  # (M, 3)
                 t_colors = torch.from_numpy(health_colors_rgba.astype(np.float32))
 
             label_colors = [t_colors[i].numpy() for i in range(M)]
 
-            # Store for observed-point recoloring
+            # Store track OBBs + colors for point recoloring
             self._track_obbs_for_pts = track_obbs
             self._track_colors_for_pts = t_colors.numpy()
 
@@ -5485,6 +5534,7 @@ class TrackerViewer(SequenceOBBViewer):
 
         # Build frustum geometry for current frame
         self._build_frustum_geometry(cam, T_wr)
+        t_frustum = time_module.perf_counter()
 
         # Update trajectory tail for this frame
         if self._traj_all_segments is not None:
@@ -5512,7 +5562,8 @@ class TrackerViewer(SequenceOBBViewer):
                     f"metadata={(t_meta - t_vis0) * 1000:.1f}ms  "
                     f"track_geom={(t_geom - t_meta) * 1000:.1f}ms  "
                     f"gpu_upload={(t_upload - t_geom) * 1000:.1f}ms  "
-                    f"frustum={(t_end - t_upload) * 1000:.1f}ms  "
+                    f"frustum={(t_frustum - t_upload) * 1000:.1f}ms  "
+                    f"recolor={(t_end - t_frustum) * 1000:.1f}ms  "
                     f"TOTAL={(t_end - t_start) * 1000:.1f}ms"
                 )
             else:

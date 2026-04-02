@@ -39,17 +39,16 @@ We host model checkpoints for BoxerNet, DinoV3 and OWLv2 on [HuggingFace](https:
 bash scripts/download_ckpts.sh
 ```
 
-## Download Sample Aria Data
+## Download Sample Project Aria Data
 
-We host three sample [Project Aria](https://www.projectaria.com/) sequences on [HuggingFace](https://huggingface.co/datasets/facebook/boxer). Download them to the `sample_data/` directory:
+We host three sample [Project Aria](https://www.projectaria.com/) sequences (hohen_gen1, nym10_gen1, cook0_gen2) on [HuggingFace](https://huggingface.co/datasets/facebook/boxer). Download them to the `sample_data/` directory:
 
 ```bash
-# Download all three sequences (hohen_gen1, nym10_gen1, cook0_gen2)
 bash scripts/download_aria_data.sh
 ```
 
-## Demo #1: Run BoxerNet in headless mode
-For this first demo, you do not need to have a display, so it will work if you are SSH'ed into a server. This will run BoxerNet on the first 10 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset.
+## Demo #1: Hello World / Run BoxerNet in headless mode
+For this first demo, you do not need to have a display, so it will work if you are SSH'ed into a server. This will run BoxerNet on the first 10 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset. This will confirm we can load up the data and run a few forward passes with the model.
 
 ```bash
 python run_boxer.py --input nym10_gen1 --max_n=10 --skip_viz
@@ -71,9 +70,9 @@ You can also run it on the other Project Aria sequences:
 
 ## Demo #3: Visualize Offline Fusion
 
-We first run boxer on a longer subset of a sequence (200 frames).
+Next, run boxer on a longer subset of a sequence (100 frames).
 ```bash
-python run_boxer.py --input nym10_gen1 --max_n=200 --skip_viz
+python run_boxer.py --input nym10_gen1 --max_n=100 --skip_viz
 ```
 This generates 2DBB and 3DBB csv files, for example:
 * output/nym10_gen1/boxer_3dbbs.csv
