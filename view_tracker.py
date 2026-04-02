@@ -52,13 +52,15 @@ def main():
     if not os.path.exists(csv_path):
         raise IOError(f"3D BB CSV not found: {csv_path}")
 
-    print(f"==> Loading OBBs from {csv_path}")
+    if args.verbose:
+        print(f"==> Loading OBBs from {csv_path}")
     timed_obbs = read_obb_csv(csv_path)
     timed_obbs = subsample_timed_obbs(
         timed_obbs, skip_n=args.skip_n, start_n=args.start_n, max_n=args.max_n
     )
-    total_dets = sum(len(obbs) for obbs in timed_obbs.values())
-    print(f"==> Loaded {len(timed_obbs)} frames, {total_dets} detections")
+    if args.verbose:
+        total_dets = sum(len(obbs) for obbs in timed_obbs.values())
+        print(f"==> Loaded {len(timed_obbs)} frames, {total_dets} detections")
 
     seq_ctx = build_seq_ctx(input_path, dataset_type)
     bb2d_csv_path = resolve_bb2d_csv(log_dir, args.bb2d_csv, args.write_name)
