@@ -904,8 +904,12 @@ def _track_color_mode_from_name(name: str) -> Optional[int]:
     return mapping.get(key)
 
 
+_verbose_logging = False
+
+
 def _startup_log(msg: str) -> None:
-    print(f"[STARTUP] {msg}")
+    if _verbose_logging:
+        print(f"[STARTUP] {msg}")
 
 
 @dataclass
@@ -3871,6 +3875,8 @@ class TrackerViewer(SequenceOBBViewer):
             freeze_tracker: If True, don't run tracker updates (fuse mode).
         """
         self._prebuilt_seq_ctx = seq_ctx
+        global _verbose_logging
+        _verbose_logging = verbose
         t_init0 = time_module.perf_counter()
         _startup_log("TrackerViewer init start")
         self.timed_obbs = timed_obbs
@@ -4544,7 +4550,7 @@ class TrackerViewer(SequenceOBBViewer):
             [(self.point_vbo, "3f 3f", "in_position", "in_color")],
         )
 
-        print(f"Loaded {P} semidense points as point cloud")
+        _startup_log(f"Loaded {P} semidense points as point cloud")
 
     def _rebuild_point_vbo_color(self) -> None:
         """Rebuild the global point cloud VBO with the current sdp_color_index."""
