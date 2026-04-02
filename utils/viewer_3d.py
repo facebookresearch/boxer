@@ -4103,6 +4103,11 @@ class TrackerViewer(SequenceOBBViewer):
         self.obs_point_vbo = None
         self.obs_point_vao = None
         self.obs_point_count = 0
+        self.obs_inside_vbo = None
+        self.obs_inside_vao = None
+        self.obs_inside_count = 0
+        self._track_obbs_for_pts = None
+        self._track_colors_for_pts = None
         self.obs_point_size = 2.0
         self.obs_point_alpha = 0.7
         self.obs_trail_secs = 0.0
@@ -4147,7 +4152,7 @@ class TrackerViewer(SequenceOBBViewer):
 
         # Track color mode: 0=Confidence (jet colormap), 1=Boxy (semantic class colors)
         # Keep Health as default to avoid expensive text-model startup on launch.
-        self.track_color_mode = 0
+        self.track_color_mode = 4
         if init_color_mode is not None:
             parsed_track_mode = _track_color_mode_from_name(init_color_mode)
             parsed_fuse_mode = _fuse_color_mode_from_name(init_color_mode)
@@ -4680,6 +4685,7 @@ class TrackerViewer(SequenceOBBViewer):
         )
         if obs_pts is None:
             self.obs_point_count = 0
+            self.obs_inside_count = 0
             if getattr(self, "_data_source", None) == "scannet" and getattr(
                 self, "_scannet_debug_points", True
             ):
@@ -4692,34 +4698,71 @@ class TrackerViewer(SequenceOBBViewer):
             self, "_scannet_debug_points", True
         ):
             print(f"[ScanNet SDP] ts={ts_ns}: uploading observed points K={K}")
-        # Use same color as global points
+
+        # Default color for points outside any tracked box
         if hasattr(self, "sdp_color_options") and hasattr(self, "sdp_color_index"):
             color_val = self.sdp_color_options[self.sdp_color_index]
         else:
-            # Early init fallback (before tracker UI/color state is fully initialized)
             color_val = (0.25, 0.25, 0.25)
         obs_colors = np.tile(np.array(color_val, dtype=np.float32), (K, 1))
-        obs_data = np.hstack([obs_positions, obs_colors]).astype(np.float32)
 
-        self.obs_point_count = K
-
-        # Reuse or create buffer
-        data_bytes = obs_data.tobytes()
-        if self.obs_point_vbo is not None and self.obs_point_vbo.size >= len(
-            data_bytes
+        # Recolor points inside tracked boxes by each box's color
+        any_inside = np.zeros(K, dtype=bool)
+        if (
+            self._track_obbs_for_pts is not None
+            and self._track_colors_for_pts is not None
         ):
-            self.obs_point_vbo.orphan(self.obs_point_vbo.size)
-            self.obs_point_vbo.write(data_bytes)
-        else:
-            if self.obs_point_vbo is not None:
-                self.obs_point_vbo.release()
-            if self.obs_point_vao is not None:
-                self.obs_point_vao.release()
-            self.obs_point_vbo = self.ctx.buffer(data_bytes)
-            self.obs_point_vao = self.ctx.vertex_array(
-                self.point_prog,
-                [(self.obs_point_vbo, "3f 3f", "in_position", "in_color")],
+            pts_t = torch.from_numpy(obs_positions).float()
+            for i in range(len(self._track_obbs_for_pts)):
+                obb = self._track_obbs_for_pts[i]
+                inside = obb.points_inside_bb3(pts_t).numpy()
+                obs_colors[inside] = self._track_colors_for_pts[i]
+                any_inside |= inside
+
+        # Outside points -> main VBO
+        outside = ~any_inside
+        n_outside = int(outside.sum())
+        self.obs_point_count = n_outside
+
+        if n_outside > 0:
+            out_data = np.hstack([obs_positions[outside], obs_colors[outside]]).astype(
+                np.float32
             )
+            data_bytes = out_data.tobytes()
+            if self.obs_point_vbo is not None and self.obs_point_vbo.size >= len(
+                data_bytes
+            ):
+                self.obs_point_vbo.orphan(self.obs_point_vbo.size)
+                self.obs_point_vbo.write(data_bytes)
+            else:
+                if self.obs_point_vbo is not None:
+                    self.obs_point_vbo.release()
+                if self.obs_point_vao is not None:
+                    self.obs_point_vao.release()
+                self.obs_point_vbo = self.ctx.buffer(data_bytes)
+                self.obs_point_vao = self.ctx.vertex_array(
+                    self.point_prog,
+                    [(self.obs_point_vbo, "3f 3f", "in_position", "in_color")],
+                )
+
+        # Inside points -> separate VBO (rendered at 2x size)
+        n_inside = int(any_inside.sum())
+        if n_inside > 0:
+            in_data = np.hstack(
+                [obs_positions[any_inside], obs_colors[any_inside]]
+            ).astype(np.float32)
+            if self.obs_inside_vbo is not None:
+                self.obs_inside_vbo.release()
+            if self.obs_inside_vao is not None:
+                self.obs_inside_vao.release()
+            self.obs_inside_vbo = self.ctx.buffer(in_data.tobytes())
+            self.obs_inside_vao = self.ctx.vertex_array(
+                self.point_prog,
+                [(self.obs_inside_vbo, "3f 3f", "in_position", "in_color")],
+            )
+            self.obs_inside_count = n_inside
+        else:
+            self.obs_inside_count = 0
 
     def _step_to_frame(self, target_idx: int) -> None:
         """Advance tracker to the target frame index.
@@ -5193,6 +5236,8 @@ class TrackerViewer(SequenceOBBViewer):
         label_positions = []
         label_colors = []
         track_snapshots = []  # (support_count, missed_count, is_visible) for label rendering
+        self._track_obbs_for_pts = None
+        self._track_colors_for_pts = None
 
         if shown_tracks:
             track_obbs = torch.stack([t.obb for t in shown_tracks])
@@ -5261,6 +5306,10 @@ class TrackerViewer(SequenceOBBViewer):
                 t_colors = torch.from_numpy(health_colors_rgba.astype(np.float32))
 
             label_colors = [t_colors[i].numpy() for i in range(M)]
+
+            # Store for observed-point recoloring
+            self._track_obbs_for_pts = track_obbs
+            self._track_colors_for_pts = t_colors.numpy()
 
             batch_idx = torch.arange(M)[:, None].expand(M, 12)
             start_pts = t_corners[batch_idx, edge_indices[:, 0][None, :].expand(M, 12)]
@@ -5430,25 +5479,26 @@ class TrackerViewer(SequenceOBBViewer):
         t_end = time_module.perf_counter()
 
         M = len(shown_tracks) if shown_tracks else 0
-        if shown_tracks:
-            print(
-                f"[BENCH] rebuild_view (frame {self.current_frame_idx}, "
-                f"{len(current_detections)} dets, {M} tracks): "
-                f"det_geom={(t_det - t0) * 1000:.1f}ms  "
-                f"metadata={(t_meta - t_vis0) * 1000:.1f}ms  "
-                f"track_geom={(t_geom - t_meta) * 1000:.1f}ms  "
-                f"gpu_upload={(t_upload - t_geom) * 1000:.1f}ms  "
-                f"frustum={(t_end - t_upload) * 1000:.1f}ms  "
-                f"TOTAL={(t_end - t_start) * 1000:.1f}ms"
-            )
-        else:
-            print(
-                f"[BENCH] rebuild_view (frame {self.current_frame_idx}, "
-                f"{len(current_detections)} dets, 0 tracks): "
-                f"det_geom={(t_det - t0) * 1000:.1f}ms  "
-                f"gpu_upload={(t_upload - t_geom) * 1000:.1f}ms  "
-                f"TOTAL={(t_end - t_start) * 1000:.1f}ms"
-            )
+        if self.tracker_verbose:
+            if shown_tracks:
+                print(
+                    f"[BENCH] rebuild_view (frame {self.current_frame_idx}, "
+                    f"{len(current_detections)} dets, {M} tracks): "
+                    f"det_geom={(t_det - t0) * 1000:.1f}ms  "
+                    f"metadata={(t_meta - t_vis0) * 1000:.1f}ms  "
+                    f"track_geom={(t_geom - t_meta) * 1000:.1f}ms  "
+                    f"gpu_upload={(t_upload - t_geom) * 1000:.1f}ms  "
+                    f"frustum={(t_end - t_upload) * 1000:.1f}ms  "
+                    f"TOTAL={(t_end - t_start) * 1000:.1f}ms"
+                )
+            else:
+                print(
+                    f"[BENCH] rebuild_view (frame {self.current_frame_idx}, "
+                    f"{len(current_detections)} dets, 0 tracks): "
+                    f"det_geom={(t_det - t0) * 1000:.1f}ms  "
+                    f"gpu_upload={(t_upload - t_geom) * 1000:.1f}ms  "
+                    f"TOTAL={(t_end - t_start) * 1000:.1f}ms"
+                )
 
     def _update_or_create_buffer(
         self,
@@ -5708,6 +5758,24 @@ class TrackerViewer(SequenceOBBViewer):
             )
             self.obs_point_vao.render(
                 mode=self.ctx.POINTS, vertices=self.obs_point_count
+            )
+
+        # Render observed points inside tracked boxes at 2x size
+        if (
+            self.show_obs_points
+            and self.obs_inside_count > 0
+            and self.obs_inside_vao is not None
+        ):
+            self.ctx.enable(self.ctx.PROGRAM_POINT_SIZE)
+            self.point_prog["mvp"].write(mvp_bytes)
+            self.point_prog["point_size"].write(
+                np.array(self.obs_point_size * 2.0, dtype="f4").tobytes()
+            )
+            self.point_prog["alpha"].write(
+                np.array(self.obs_point_alpha, dtype="f4").tobytes()
+            )
+            self.obs_inside_vao.render(
+                mode=self.ctx.POINTS, vertices=self.obs_inside_count
             )
 
         # Restore full viewport for imgui rendering

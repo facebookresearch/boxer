@@ -745,6 +745,7 @@ class ObbTW(TensorWrapper):
         T_world_rig: PoseTW,
         num_samples_per_edge: int = 10,
         valid_ratio: float = 0.1667,
+        skip_fov: bool = False,
     ):
         """
         get the 2d bbs of the projection of the 3d bbs into all given camera view points.
@@ -758,7 +759,12 @@ class ObbTW(TensorWrapper):
         """
         assert self._data.shape[-2] > 0, "No valid 3d bbs data found!"
         return bb2d_from_project_bb3d(
-            self, cam, T_world_rig, num_samples_per_edge, valid_ratio
+            self,
+            cam,
+            T_world_rig,
+            num_samples_per_edge,
+            valid_ratio,
+            skip_fov=skip_fov,
         )
 
     def get_bb2_heights(self, cam_id):
@@ -1083,7 +1089,11 @@ def rot_obb2_cw(bb2: torch.Tensor, size: Tuple[int]):
 
 
 def project_bb3d_onto_image(
-    obbs: ObbTW, cam: CameraTW, T_world_rig: PoseTW, num_samples_per_edge: int = 1
+    obbs: ObbTW,
+    cam: CameraTW,
+    T_world_rig: PoseTW,
+    num_samples_per_edge: int = 1,
+    skip_fov: bool = False,
 ):
     """
     project 3d bb edge points into snippet images defined by T_world_rig and
@@ -1174,7 +1184,7 @@ def project_bb3d_onto_image(
         .batch_transform(bb3pts_world.view(-1, 3))
         .view(B, T, -1, 3)
     )
-    bb3pts_im, bb3pts_valids = cam.project(bb3pts_cam)
+    bb3pts_im, bb3pts_valids = cam.project(bb3pts_cam, skip_fov=skip_fov)
     bb3pts_im = bb3pts_im.view(B, T, N, -1, 2)
     bb3pts_valids = bb3pts_valids.detach().view(B, T, N, -1)
 
@@ -1191,6 +1201,7 @@ def bb2d_from_project_bb3d(
     T_world_rig: PoseTW,
     num_samples_per_edge: int = 1,
     valid_ratio: float = 0.1667,
+    skip_fov: bool = False,
 ):
     """
     get 2d bbs around the 3d bb corners of obbs projected into the image coordinate system
@@ -1212,7 +1223,11 @@ def bb2d_from_project_bb3d(
         bb2s_valid (Tensor): valid indices of bb2s; shape is (Bx)TxN
     """
     bb3corners_im, bb3corners_valids = project_bb3d_onto_image(
-        obbs, cam, T_world_rig, num_samples_per_edge
+        obbs,
+        cam,
+        T_world_rig,
+        num_samples_per_edge,
+        skip_fov=skip_fov,
     )
     # get image points that will min and max reduce correctly given the valid masks
     bb3corners_im_min = torch.where(

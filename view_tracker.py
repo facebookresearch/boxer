@@ -29,9 +29,10 @@ def main():
     add_common_args(parser)
     parser.add_argument("--init_follow", action="store_true", help="Initialize with Follow View enabled")
     parser.add_argument("--init_follow_behind", type=float, default=None, help="Follow-view behind distance (meters)")
-    parser.add_argument("--init_follow_above", type=float, default=None, help="Follow-view above distance (meters)")
+    parser.add_argument("--init_follow_above", type=float, default=6.0, help="Follow-view above distance (meters)")
     parser.add_argument("--init_follow_look_ahead", type=float, default=None, help="Follow-view look-ahead distance (meters)")
     parser.add_argument("--init_show_obs", action="store_true", help="Initially show observed points")
+    parser.add_argument("--autoplay", action="store_true", help="Automatically start playback")
     parser.add_argument("--autorecord", action="store_true")
     parser.add_argument("--record_fps", type=float, default=0.0, help="Recording FPS (0 = auto)")
     parser.add_argument("--teaser", action="store_true")
@@ -93,6 +94,9 @@ def main():
                 scannet_annotation_path=args.scannet_annotation_path,
                 **kw,
             )
+            if args.autoplay:
+                self.is_playing = True
+                self.follow_view = True
 
     launch_viewer(Viewer)
 

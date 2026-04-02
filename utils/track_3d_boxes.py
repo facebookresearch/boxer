@@ -91,7 +91,7 @@ class BoundingBox3DTracker:
         conf_threshold: float = 0.55,
         ema_decay: float = 0.0,
         samp_per_dim: int = 8,
-        max_missed: int = 5,
+        max_missed: int = 30,
         force_cpu: bool = False,
         merge_iou_threshold: float = 0.5,
         merge_semantic_threshold: float = 0.7,
@@ -138,6 +138,31 @@ class BoundingBox3DTracker:
         self.last_iou_matrix_size: tuple[int, int] = (0, 0)
         self._embedding_cache: dict[str, torch.Tensor] = {}
         self._embed_model = None
+        self._embed_thread = None
+
+        # Try to load precomputed text embeddings from OWL cache (fast, no model load).
+        if self.merge_iou_threshold > 0 and self.merge_semantic_threshold > 0:
+            from utils.fuse_3d_boxes import _load_cached_text_embeddings
+
+            cached = _load_cached_text_embeddings()
+            if cached is not None:
+                self._embedding_cache = cached
+            else:
+                # Fall back to loading TextEmbedder in background thread.
+                import threading
+
+                def _load_embedder():
+                    try:
+                        from owl.clip_tokenizer import TextEmbedder
+
+                        self._embed_model = TextEmbedder()
+                    except ImportError:
+                        pass
+
+                self._embed_thread = threading.Thread(
+                    target=_load_embedder, daemon=True
+                )
+                self._embed_thread.start()
 
     def _get_next_id(self) -> int:
         """Get next unique track ID."""
@@ -207,19 +232,14 @@ class BoundingBox3DTracker:
             # Stack only visible track OBBs for batch IoU (V×N instead of M×N)
             visible_obbs = torch.stack([self.tracks[i].obb for i in visible_indices])
 
-            # Move to GPU if available for IoU computation
-            if self.force_cpu:
+            # Move to CUDA if available for IoU computation (skip MPS — transfer
+            # overhead dominates for small matrices and causes scheduling jitter).
+            if self.force_cpu or not torch.cuda.is_available():
                 visible_obbs_gpu = visible_obbs
                 detections_gpu = detections
-            elif torch.backends.mps.is_available():
-                visible_obbs_gpu = visible_obbs.to("mps")
-                detections_gpu = detections.to("mps")
-            elif torch.cuda.is_available():
+            else:
                 visible_obbs_gpu = visible_obbs.to("cuda")
                 detections_gpu = detections.to("cuda")
-            else:
-                visible_obbs_gpu = visible_obbs
-                detections_gpu = detections
 
             # Compute V×N IoU matrix (visible tracks only)
             iou_result = iou_mc7(
@@ -260,9 +280,13 @@ class BoundingBox3DTracker:
         self.last_iou_matrix_size = (V, N)
 
         # Create new tracks from unmatched detections
+        t_create0 = time.perf_counter()
+        n_created = 0
         for j in range(N):
             if j not in matched_detections:
                 self._create_track(detections[j], frame_idx)
+                n_created += 1
+        t_create = time.perf_counter()
 
         # Age unmatched tracks: unmatched visible + all invisible
         unmatched_indices = [
@@ -275,22 +299,23 @@ class BoundingBox3DTracker:
         t_age = time.perf_counter()
 
         # Remove dead tracks
-        if self.verbose:
-            for t in self.tracks:
-                if self._should_remove(t, frame_idx):
-                    frames_since = frame_idx - t.last_seen_frame
-                    avg_p = t.accumulated_weight / max(t.support_count, 1)
-                    print(
-                        f"  [TRACK] REMOVE id={t.track_id} '{t.cached_text}' "
-                        f"state={t.state.name} support={t.support_count} "
-                        f"missed={t.missed_count} frames_since_seen={frames_since} "
-                        f"avg_conf={avg_p:.2f}"
-                    )
         self.tracks = [t for t in self.tracks if not self._should_remove(t, frame_idx)]
         t_remove = time.perf_counter()
 
         # Merge duplicate tracks (every N frames to amortize cost)
         if self.merge_interval <= 1 or frame_idx % self.merge_interval == 0:
+            # Batch pre-cache text embeddings before merge
+            if self._embed_model is not None:
+                uncached = [
+                    t.cached_text
+                    for t in self.tracks
+                    if t.cached_text not in self._embedding_cache
+                    and t.cached_text != "?"
+                ]
+                if uncached:
+                    embs = self._embed_model.forward(uncached)
+                    for text, emb in zip(uncached, embs):
+                        self._embedding_cache[text] = emb
             self._merge_duplicate_tracks(cam=cam, T_world_rig=T_world_rig)
         t_merge = time.perf_counter()
 
@@ -302,7 +327,8 @@ class BoundingBox3DTracker:
                 f"  [BENCH] tracker.update ({V}v/{M}x{N}): "
                 f"iou={(t_iou - t0) * 1000:.1f}ms  "
                 f"hungarian={(t_hungarian - t_iou) * 1000:.1f}ms  "
-                f"age({len(unmatched_indices)})={(t_age - t_hungarian) * 1000:.1f}ms  "
+                f"create({n_created})={(t_create - t_create0) * 1000:.1f}ms  "
+                f"age({len(unmatched_indices)})={(t_age - t_create) * 1000:.1f}ms  "
                 f"merge={(t_merge - t_remove) * 1000:.1f}ms  "
                 f"tracks={len(self.tracks)}(T={n_tent}/A={n_active}/I={n_inactive}) "
                 f"matched={len(matched_tracks)}/{V}vis"
@@ -329,22 +355,20 @@ class BoundingBox3DTracker:
             cached_text=text_label,
         )
         self.tracks.append(track)
-        if self.verbose:
-            print(
-                f"  [TRACK] CREATE id={new_id} '{text_label}' "
-                f"prob={prob:.2f} frame={frame_idx}"
-            )
 
     def _get_text_embedding(self, text: str) -> torch.Tensor:
         """Get normalized text embedding, using persistent cache."""
         if text not in self._embedding_cache:
             if self._embed_model is None:
-                try:
+                # Wait for background loader if it's running
+                if self._embed_thread is not None:
+                    self._embed_thread.join()
+                    self._embed_thread = None
+                # If still None (background load failed or wasn't started), load now
+                if self._embed_model is None:
                     from owl.clip_tokenizer import TextEmbedder
-                except ImportError:
-                    raise ImportError("condense_text module not available")
 
-                self._embed_model = TextEmbedder()
+                    self._embed_model = TextEmbedder()
             self._embedding_cache[text] = self._embed_model.forward([text])[
                 0
             ]  # (embed_dim,)
@@ -368,11 +392,6 @@ class BoundingBox3DTracker:
             or track.accumulated_weight >= self.min_confidence_mass
         ):
             track.state = TrackState.ACTIVE
-            if self.verbose:
-                print(
-                    f"  [TRACK] PROMOTE id={track.track_id} '{track.cached_text}' "
-                    f"support={track.support_count} conf_mass={track.accumulated_weight:.2f}"
-                )
         elif track.state == TrackState.INACTIVE:
             track.state = TrackState.ACTIVE
 
@@ -687,6 +706,7 @@ class BoundingBox3DTracker:
         vis_to_all_idx = [all_id_to_idx[t.track_id] for t in visible_candidates]
 
         # V×N 3D IoU (always request GIoU so we can use it as fallback)
+        t_merge0 = time.perf_counter()
         visible_stacked = ObbTW(
             torch.stack([t.obb._data.squeeze() for t in visible_candidates])
         )
@@ -698,6 +718,7 @@ class BoundingBox3DTracker:
             all_stacked,
             samp_per_dim=self.samp_per_dim,
         )
+        t_merge_iou = time.perf_counter()
 
         # V×N semantic similarity (cached embeddings, cheap)
         vis_embeddings = torch.stack(
@@ -707,6 +728,7 @@ class BoundingBox3DTracker:
             [self._get_text_embedding(t.cached_text) for t in all_candidates]
         )
         sem_matrix = vis_embeddings @ all_embeddings.t()  # (V, N)
+        t_merge_sem = time.perf_counter()
 
         # Apply semantic similarity overrides for known-similar label pairs
         for i in range(V):
@@ -765,6 +787,8 @@ class BoundingBox3DTracker:
             valid_mask = v_valid[:, None] & bb2s_valid[None, :]  # (V, N)
             iou_2d_matrix[~valid_mask] = 0.0
 
+        t_merge_2d = time.perf_counter()
+
         # Greedy merge: i indexes visible_candidates (rows), j indexes all_candidates (cols)
         absorbed_ids: set[int] = set()
 
@@ -803,6 +827,17 @@ class BoundingBox3DTracker:
                     absorbed_ids.add(visible_candidates[i].track_id)
                     break  # i is gone
 
+        if self.verbose:
+            t_merge_end = time.perf_counter()
+            print(
+                f"  [BENCH] merge ({V}v x {N}n): "
+                f"iou3d={(t_merge_iou - t_merge0) * 1000:.1f}ms  "
+                f"sem={(t_merge_sem - t_merge_iou) * 1000:.1f}ms  "
+                f"iou2d={(t_merge_2d - t_merge_sem) * 1000:.1f}ms  "
+                f"greedy={(t_merge_end - t_merge_2d) * 1000:.1f}ms  "
+                f"absorbed={len(absorbed_ids)}"
+            )
+
         if absorbed_ids:
             self.tracks = [t for t in self.tracks if t.track_id not in absorbed_ids]
 
@@ -815,6 +850,7 @@ class BoundingBox3DTracker:
         observed_points: Optional[torch.Tensor] = None,
     ) -> None:
         """Age a batch of unmatched tracks with a single batched visibility check."""
+        t_age0 = time.perf_counter()
         tracks_to_age = [self.tracks[i] for i in track_indices]
 
         # Stack OBBs once for reuse in both visibility and containment checks
@@ -829,12 +865,14 @@ class BoundingBox3DTracker:
             _, bb2_valid = stacked_obbs.get_pseudo_bb2(
                 cam.unsqueeze(0),
                 T_world_rig.unsqueeze(0),
-                num_samples_per_edge=10,
+                num_samples_per_edge=4,
                 valid_ratio=0.16667,
+                skip_fov=True,
             )
             is_visible = bb2_valid.squeeze(0)  # (K,) bool tensor
         else:
             is_visible = None
+        t_age_vis = time.perf_counter()
 
         # Semidense containment check: count observed points inside each track's 3D box
         if observed_points is not None and stacked_obbs is not None:
@@ -846,6 +884,16 @@ class BoundingBox3DTracker:
             has_enough_points = points_inside_count >= self.min_obs_points  # (K,) bool
         else:
             has_enough_points = None
+            N_pts = 0
+        t_age_pts = time.perf_counter()
+
+        if self.verbose:
+            K = len(tracks_to_age)
+            print(
+                f"  [BENCH] age ({K} tracks, {N_pts} pts): "
+                f"bb2={(t_age_vis - t_age0) * 1000:.1f}ms  "
+                f"pts_inside={(t_age_pts - t_age_vis) * 1000:.1f}ms"
+            )
 
         for k, track in enumerate(tracks_to_age):
             frames_since_seen = frame_idx - track.last_seen_frame

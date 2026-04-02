@@ -574,7 +574,11 @@ class CameraTW(TensorWrapper):
 
     @autocast
     def project(
-        self, p3d: torch.Tensor, fov_deg: float = 140.0, suppress_warning: bool = False
+        self,
+        p3d: torch.Tensor,
+        fov_deg: float = 140.0,
+        suppress_warning: bool = False,
+        skip_fov: bool = False,
     ) -> Tuple[torch.Tensor]:
         """Transform 3D points into 2D pixel coordinates."""
 
@@ -605,7 +609,8 @@ class CameraTW(TensorWrapper):
         in_front = p3d[..., -1] > 0
         valid = in_image & in_radius & in_front
 
-        valid = valid & self.in_fov(p3d, fov_deg)
+        if not skip_fov:
+            valid = valid & self.in_fov(p3d, fov_deg)
 
         # pyre-fixme[7]: Expected `Tuple[Tensor]` but got `Tuple[Any, Any]`.
         #  Expected has length 1, but actual has length 2.
