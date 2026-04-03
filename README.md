@@ -101,10 +101,10 @@ python view_tracker.py --input nym10_gen1
 We provide helper scripts to set up additional data sources:
 
 ```bash
-# Omni3D SUN-RGBD: extract 20 sample images from your local SUNRGBD data
+# Omni3D SUN-RGBD: extract 20 sample images to sample_data/
 python scripts/download_omni3d_sample.py
 
-# CA-1M: extract a sample sequence from your local CA-1M data
+# CA-1M: extract a sample sequence to sample_data/
 python scripts/download_ca1m_sample.py
 
 # ScanNet: manually download from https://github.com/scannet/scannet
