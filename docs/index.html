@@ -27,7 +27,9 @@ LICENSE file in the root directory of this source tree. -->
                 </div>
                 <div class="hero-buttons">
                     <a href="https://github.com/facebookresearch/boxer" class="btn btn-primary">Code & Model</a>
+                    <a href="https://youtu.be/YtZD3A70RN4" class="btn btn-secondary">Video</a>
                     <a href="https://huggingface.co/facebook/boxer" class="btn btn-secondary">HuggingFace</a>
+                    <a href="https://huggingface.co/datasets/facebook/boxer" class="btn btn-secondary">Data</a>
                 </div>
             </div>
             <div class="hero-media">
@@ -130,11 +132,12 @@ LICENSE file in the root directory of this source tree. -->
             <div class="code-blocks">
                 <div class="code-block">
                     <h3>Installation</h3>
-                    <pre><code>conda create -n boxer python=3.12
-conda activate boxer
-pip install 'torch>=2.0' numpy opencv-python tqdm dill
-pip install projectaria-tools          # Aria support
-pip install moderngl moderngl-window 'imgui[glfw]'  # 3D viewer</code></pre>
+                    <pre><code>curl -LsSf https://astral.sh/uv/install.sh | sh  # install uv
+uv venv boxer --python 3.12
+source boxer/bin/activate
+uv pip install 'torch>=2.0' numpy opencv-python tqdm dill
+uv pip install projectaria-tools          # Aria support
+uv pip install moderngl moderngl-window imgui-bundle  # 3D viewer</code></pre>
                 </div>
                 <div class="code-block">
                     <h3>Download Models & Data</h3>

@@ -5,6 +5,8 @@ This repo contains the code and pre-trained model needed to run Boxer on a varie
 
 ![Boxer System Architecture](assets/boxer_system.jpg)
 
+[Project Page](https://facebookresearch.github.io/boxer)  |  [Video](https://youtu.be/YtZD3A70RN4)  |  [HF-Model](https://huggingface.co/facebook/boxer)  |  [HF-Data](https://huggingface.co/datasets/facebook/boxer)  |  [Code](https://github.com/facebookresearch/boxer)
+
 In this repo, we provide sample code for running on the following data sources:
 * Project Aria Gen 1 & 2
 * CA-1M
@@ -17,18 +19,21 @@ In this repo, we provide sample code for running on the following data sources:
 We tested on MacOS (with mps acceleration) and Fedora (with CUDA acceleration).
 
 ```bash
-# Create conda environment
-conda create -n boxer python=3.12
-conda activate boxer
+# Install uv (https://docs.astral.sh/uv/)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create virtual environment with uv
+uv venv boxer --python 3.12
+source boxer/bin/activate
 
 # Core dependencies for running Boxer
-pip install 'torch>=2.0' numpy opencv-python tqdm dill
+uv pip install 'torch>=2.0' numpy opencv-python tqdm dill
 
 # To support Project Aria loading
-pip install projectaria-tools
+uv pip install projectaria-tools
 
 # 3D interactive viewer for view_*.py scripts
-pip install moderngl moderngl-window 'imgui[glfw]'
+uv pip install moderngl moderngl-window imgui-bundle
 ```
 
 ## Download Model Checkpoints
