@@ -262,6 +262,20 @@ button {
     line-height: 1.7;
 }
 
+/* ===== Full-Width Image ===== */
+.full-width-image {
+    width: 100%;
+    border-radius: var(--border-radius-lg);
+    overflow: hidden;
+    border: 1px solid var(--color-border);
+}
+
+.full-width-image img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
 /* ===== Purpose / Overview Section ===== */
 .purpose-section {
     background: var(--color-bg-primary);

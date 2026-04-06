@@ -1,17 +1,12 @@
-# Overview
-Boxer lifts 2D object detections into static, global, fused 3D oriented bounding boxes (OBBs) from posed images and semi-dense point clouds, focused on indoor object detection.
+##  Boxer: Robust Lifting of Open-World 2D Bounding Boxes to 3D
 
-This repo contains the code and pre-trained model needed to run Boxer on a variety of input data sources (inference only code).
+![Boxer System Architecture](docs/assets/boxer_system.jpg)
 
-![Boxer System Architecture](assets/boxer_system.jpg)
+Boxer lifts 2D object detections into static, global, fused 3D oriented bounding boxes (OBBs) from posed images and semi-dense point clouds, focused on indoor object detection. This repo contains the code and pre-trained model (no training code) needed to run Boxer on a variety of input data sources (inference only code).
+
 
 [Project Page](https://facebookresearch.github.io/boxer)  |  [Video](https://youtu.be/YtZD3A70RN4)  |  [HF-Model](https://huggingface.co/facebook/boxer)  |  [HF-Data](https://huggingface.co/datasets/facebook/boxer)  |  [Code](https://github.com/facebookresearch/boxer)
 
-In this repo, we provide sample code for running on the following data sources:
-* Project Aria Gen 1 & 2
-* CA-1M
-* SUN-RGBD
-* ScanNet (manual download needed)
 
 
 ## Installation
@@ -46,7 +41,13 @@ bash scripts/download_ckpts.sh
 
 ## Download Sample Project Aria Data
 
-We host three sample [Project Aria](https://www.projectaria.com/) sequences (hohen_gen1, nym10_gen1, cook0_gen2) on [HuggingFace](https://huggingface.co/datasets/facebook/boxer). Download them to the `sample_data/` directory:
+In this repo, we provide sample code for running on the following data sources:
+* Project Aria Gen 1 & 2
+* CA-1M
+* SUN-RGBD
+* ScanNet (manual download needed)
+
+Lets first start with Aria data. We host three sample [Project Aria](https://www.projectaria.com/) sequences (hohen_gen1, nym10_gen1, cook0_gen2) on [HuggingFace](https://huggingface.co/datasets/facebook/boxer). Download them to the `sample_data/` directory:
 
 ```bash
 bash scripts/download_aria_data.sh
@@ -55,8 +56,10 @@ bash scripts/download_aria_data.sh
 ## Demo #1: Hello World / Run BoxerNet in headless mode
 For this first demo, you do not need to have a display, so it will work if you are SSH'ed into a server. This will run BoxerNet on the first 10 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset. This will confirm we can load up the data and run a few forward passes with the model.
 
+Expected to takes ~1-2 mins on mac MPS, <10 secs on CUDA.
+
 ```bash
-python run_boxer.py --input nym10_gen1 --max_n=10 --skip_viz
+python run_boxer.py --input nym10_gen1 --max_n=90 --skip_viz
 ```
 
 ## Demo #2: BoxerNet Interactive Demo on Aria Data
@@ -67,7 +70,7 @@ python view_prompt.py --input nym10_gen1
 
 You should see a window that looks like this:
 
-![View Prompt Demo](assets/view_prompt_demo.jpg)
+![View Prompt Demo](docs/assets/view_prompt_demo.jpg)
 
 You can also run it on the other Project Aria sequences:
 * python view_prompt.py --input hohen_gen1
@@ -75,11 +78,7 @@ You can also run it on the other Project Aria sequences:
 
 ## Demo #3: Visualize Offline Fusion
 
-Next, run boxer on a longer subset of a sequence (100 frames).
-```bash
-python run_boxer.py --input nym10_gen1 --max_n=100 --skip_viz
-```
-This generates 2DBB and 3DBB csv files, for example:
+Make sure to run Demo #1 first. This generates 2DBB and 3DBB csv files, for example:
 * output/nym10_gen1/boxer_3dbbs.csv
 * output/nym10_gen1/owl_2dbbs.csv
 
@@ -91,15 +90,24 @@ python view_fusion.py --input nym10_gen1
 
 You should see a window like this:
 
-![View Fusion Demo](assets/view_fusion_demo.jpg)
+![View Fusion Demo](docs/assets/view_fusion_demo.jpg)
 
 ## Demo #4: Online Tracker (requires demo #3)
 
-Make sure to run Demo #3 above first to generate the 2DBB and 3DBB CSVs. Run the online tracker, which will estimate 3DBBs on the fly as new images are observed:
+Make sure to run Demo #1 above first to generate the 2DBB and 3DBB CSVs. Run the online tracker, which will estimate 3DBBs on the fly as new images are observed:
 
 ```bash
-python view_tracker.py --input nym10_gen1
+python view_tracker.py --input nym10_gen1 --autoplay
 ```
+
+## Demo #5: Running on CA-1M data
+
+```bash
+# CA-1M: extract a sample sequence to sample_data/
+python scripts/download_ca1m_sample.py
+```
+
+
 
 ## Download Other Data Samples
 
@@ -108,9 +116,6 @@ We provide helper scripts to set up additional data sources:
 ```bash
 # Omni3D SUN-RGBD: extract 20 sample images to sample_data/
 python scripts/download_omni3d_sample.py
-
-# CA-1M: extract a sample sequence to sample_data/
-python scripts/download_ca1m_sample.py
 
 # ScanNet: manually download from https://github.com/scannet/scannet
 # then place the scene directory in sample_data/, e.g. sample_data/scene0707_00

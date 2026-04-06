@@ -57,10 +57,10 @@ if platform.system() == "Darwin":
     except Exception:
         pass
 
-import imgui
+import utils.imgui_compat as imgui
 import moderngl_window as mglw
 import numpy as np
-from moderngl_window.integrations.imgui import ModernglWindowRenderer
+from utils.imgui_renderer import ModernglImguiRenderer
 
 scale_factor = 1
 if platform.system() == "Linux":
@@ -127,36 +127,32 @@ class OrbitViewer(mglw.WindowConfig):
 
         # --- ImGui setup ---
         imgui.create_context()
-        self.imgui = ModernglWindowRenderer(self.wnd)
+        self.imgui = ModernglImguiRenderer(self.wnd)
 
         io = imgui.get_io()
         dpi = self.wnd.pixel_ratio
         # Increase font size on Linux for better readability
         if platform.system() == "Linux":
-            io.font_global_scale = dpi * scale_factor
+            imgui.get_style().font_scale_main = dpi * scale_factor
             # Also scale UI elements (sliders, buttons, etc.) on Linux
             style = imgui.get_style()
             # Manually scale style sizes since scale_all_sizes() may not be available
-            style.window_padding = (
-                style.window_padding[0] * scale_factor,
-                style.window_padding[1] * scale_factor,
-            )
-            style.frame_padding = (
-                style.frame_padding[0] * scale_factor,
-                style.frame_padding[1] * scale_factor,
-            )
-            style.item_spacing = (
-                style.item_spacing[0] * scale_factor,
-                style.item_spacing[1] * scale_factor,
-            )
-            style.item_inner_spacing = (
-                style.item_inner_spacing[0] * scale_factor,
-                style.item_inner_spacing[1] * scale_factor,
-            )
+            wp = style.window_padding
+            style.window_padding = imgui.ImVec2(wp.x * scale_factor, wp.y * scale_factor)
+            fp = style.frame_padding
+            style.frame_padding = imgui.ImVec2(fp.x * scale_factor, fp.y * scale_factor)
+            isp = style.item_spacing
+            style.item_spacing = imgui.ImVec2(isp.x * scale_factor, isp.y * scale_factor)
+            iisp = style.item_inner_spacing
+            style.item_inner_spacing = imgui.ImVec2(iisp.x * scale_factor, iisp.y * scale_factor)
             style.scrollbar_size *= scale_factor
             style.grab_min_size *= scale_factor
         else:
-            io.font_global_scale = dpi
+            # Scale UI for Retina displays
+            if dpi > 1.0:
+                style = imgui.get_style()
+                style.scale_all_sizes(dpi)
+                imgui.get_style().font_scale_main = dpi
 
         # --- Orbit camera controls ---
         self.camera_distance = 5.0
@@ -366,6 +362,7 @@ class OrbitViewer(mglw.WindowConfig):
         self.render_3d(time, frame_time)
 
         # Render ImGui UI
+        imgui.backends.opengl3_new_frame()
         imgui.new_frame()
         self.render_ui()
         imgui.render()
@@ -415,10 +412,8 @@ class OrbitViewer(mglw.WindowConfig):
                 )
 
     def on_mouse_scroll_event(self, x_offset: float, y_offset: float):
-        # Manually handle imgui scroll since mouse_scroll_event may not be compatible
         io = imgui.get_io()
-        if hasattr(io, "mouse_wheel"):
-            io.mouse_wheel = y_offset
+        io.add_mouse_wheel_event(float(x_offset), float(y_offset))
 
         # Use mouse position to decide if scroll should go to UI or 3D viewport
         mouse_x = io.mouse_pos.x if hasattr(io.mouse_pos, "x") else io.mouse_pos[0]
@@ -1873,6 +1868,9 @@ class OBBViewer(OrbitViewer):
     def _build_tracked_all_geometry(self) -> None:
         """Build per-instance line segment data for fused boxes."""
         if not self.tracked_all_instances:
+            return
+        # Skip if instances are placeholders (e.g. tracker uses GPU buffers directly)
+        if not hasattr(self.tracked_all_instances[0], "obb"):
             return
 
         # Clear text labels, positions, and colors
@@ -6187,49 +6185,9 @@ class TrackerViewer(SequenceOBBViewer):
             self._rebuild_current_view()
         imgui.pop_item_width()
 
-        _changed, self.show_trajectory = imgui.checkbox(
-            "Show Trajectory", self.show_trajectory
-        )
-        _changed, self.show_frustum = imgui.checkbox("Show Frustum", self.show_frustum)
         _changed, self.show_bb2_panel = imgui.checkbox(
             "Show 2DBB Panel", self.show_bb2_panel
         )
-        if getattr(self, "_rgb_images", None) is not None:
-            _changed, self.show_rgb_labels = imgui.checkbox(
-                "Show RGB Labels", self.show_rgb_labels
-            )
-
-        if imgui.tree_node("Advanced Visuals"):
-            imgui.push_item_width(200)
-            _changed, self.traj_alpha = imgui.slider_float(
-                "Traj Alpha", self.traj_alpha, 0.0, 1.0
-            )
-            changed, self.traj_tail_secs = imgui.slider_float(
-                "Traj Tail (s)", self.traj_tail_secs, 0.5, 30.0
-            )
-            if (
-                changed
-                and self._traj_all_segments is not None
-                and self.total_frames > 0
-            ):
-                ts = self.sorted_timestamps[self.current_frame_idx]
-                self._update_trajectory_tail(ts)
-            changed, self.frustum_scale = imgui.slider_float(
-                "Frustum Scale", self.frustum_scale, 0.001, 0.5
-            )
-            if changed and self.total_frames > 0:
-                ts = self.sorted_timestamps[self.current_frame_idx]
-                cam, T_wr = self._get_cam_and_pose(ts)
-                self._build_frustum_geometry(cam, T_wr)
-            if getattr(self, "_rgb_images", None) is not None:
-                _changed, self.rgb_obb_thickness = imgui.slider_float(
-                    "RGB 3DBB Width", self.rgb_obb_thickness, 1.0, 10.0
-                )
-                _changed, self.rgb_text_scale = imgui.slider_float(
-                    "RGB Text Scale", self.rgb_text_scale, 0.5, 5.0
-                )
-            imgui.pop_item_width()
-            imgui.tree_pop()
 
         # === Points ===
         if self.point_count > 0:
