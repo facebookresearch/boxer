@@ -276,6 +276,18 @@ bash tests/run_tests.sh test_gravity
 bash tests/run_tests.sh --no-open
 ```
 
+## Citation
+
+If you find Boxer useful in your research, please consider citing:
+
+```bibtex
+@misc{boxer2026,
+      title={Boxer: Robust Lifting of Open-World 2D Bounding Boxes to 3D},
+      author={Daniel DeTone and Tianwei Shen and Fan Zhang and Lingni Ma and Julian Straub and Richard Newcombe and Jakob Engel},
+      year={2026},
+}
+```
+
 ## License
 
 The majority of Boxer is licensed under CC-BY-NC. See the [LICENSE](LICENSE) file for details. However portions of the project are available under separate license terms: see [NOTICE](NOTICE).

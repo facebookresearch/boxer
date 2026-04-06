@@ -1,0 +1,223 @@
+<!-- Copyright (c) Meta Platforms, Inc. and affiliates.
+This source code is licensed under the CC BY-NC 4.0 license found in the
+LICENSE file in the root directory of this source tree. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boxer</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="hero-container">
+            <div class="hero-content">
+                <h1 class="hero-title">Boxer</h1>
+                <p class="hero-subtitle">
+                    Robust Lifting of Open-World 2D Bounding Boxes to 3D
+                </p>
+                <div class="hero-authors">
+                    <p class="author-list">Daniel DeTone, Tianwei Shen, Fan Zhang, Lingni Ma, Julian Straub, Richard Newcombe, and Jakob Engel</p>
+                    <p class="author-affiliation">Meta Reality Labs Research</p>
+                </div>
+                <div class="hero-buttons">
+                    <a href="https://github.com/facebookresearch/boxer" class="btn btn-primary">Code & Model</a>
+                    <a href="https://huggingface.co/facebook/boxer" class="btn btn-secondary">HuggingFace</a>
+                </div>
+            </div>
+            <div class="hero-media">
+                <div class="video-container">
+                    <img src="images/boxer_system.jpg" alt="Boxer System Architecture">
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Overview Section -->
+    <section class="purpose-section">
+        <div class="section-container">
+            <h2 class="section-title">What is Boxer?</h2>
+            <p class="section-description">
+                Boxer lifts 2D object detections into static, global, fused 3D oriented bounding boxes (OBBs) from posed images and semi-dense point clouds. It is focused on indoor object detection and comes with a pre-trained model for running inference on a variety of data sources.
+            </p>
+            <div class="purpose-grid">
+                <div class="video-card">
+                    <div class="video-card-media">
+                        <img src="images/view_prompt_demo.jpg" alt="Interactive Prompt Demo">
+                    </div>
+                    <p class="video-card-caption">Interactive demo: create 2D bounding box prompts and enter text to prompt OWL to detect objects in real time.</p>
+                </div>
+                <div class="video-card">
+                    <div class="video-card-media">
+                        <img src="images/view_fusion_demo.jpg" alt="3D Fusion Visualization">
+                    </div>
+                    <p class="video-card-caption">Offline 3D fusion: merge per-frame 3D bounding box predictions into globally consistent oriented bounding boxes.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- How It Works Section -->
+    <section class="technical-section">
+        <div class="section-container">
+            <h2 class="section-title">How It Works</h2>
+            <p class="section-description">
+                Boxer uses a two-stage pipeline. First, an open-vocabulary 2D detector (OWLv2) finds objects in each frame. Then, BoxerNet lifts each 2D detection into a 3D oriented bounding box using camera intrinsics, gravity direction, and optional semi-dense depth. Detections across frames can be fused offline or tracked online for temporal consistency.
+            </p>
+            <div class="process-steps">
+                <div class="step">
+                    <div class="step-content">
+                        <h3>2D Detection</h3>
+                        <p>OWLv2 open-vocabulary detector finds objects using text prompts or manual 2D bounding box prompts. Supports custom label taxonomies.</p>
+                    </div>
+                </div>
+                <div class="step">
+                    <div class="step-content">
+                        <h3>3D Lifting</h3>
+                        <p>BoxerNet encodes the image crop with DINOv3, cross-attends with camera and depth features, and predicts a full 3D oriented bounding box per detection.</p>
+                    </div>
+                </div>
+                <div class="step">
+                    <div class="step-content">
+                        <h3>Fusion & Tracking</h3>
+                        <p>Per-frame 3D boxes are merged via offline Hungarian-algorithm fusion or online tracking for globally consistent scene-level 3D detections.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Data Sources Section -->
+    <section class="dataset-section">
+        <div class="section-container">
+            <h2 class="section-title">Supported Data Sources</h2>
+            <p class="section-description">
+                Boxer works out of the box with multiple data sources. For each, it requires images, camera intrinsics, gravity direction, and optionally depth. For video sequences, 6-DoF poses enable multi-frame fusion.
+            </p>
+            <div class="data-sources-grid">
+                <div class="data-source-card">
+                    <h3>Project Aria Gen 1 & 2</h3>
+                    <p>Full support including fisheye cameras, VRS recordings, and semi-dense point clouds from visual-inertial SLAM.</p>
+                </div>
+                <div class="data-source-card">
+                    <h3>CA-1M</h3>
+                    <p>Large-scale indoor dataset with posed RGB-D sequences for benchmarking 3D object detection.</p>
+                </div>
+                <div class="data-source-card">
+                    <h3>SUN-RGBD</h3>
+                    <p>Single-image indoor scenes with depth maps via the Omni3D dataset interface.</p>
+                </div>
+                <div class="data-source-card">
+                    <h3>ScanNet</h3>
+                    <p>Dense indoor reconstructions with posed RGB-D frames for room-scale 3D detection.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Quick Start Section -->
+    <section class="quickstart-section">
+        <div class="section-container">
+            <h2 class="section-title">Quick Start</h2>
+            <p class="section-description">
+                Get Boxer running in minutes.
+            </p>
+            <div class="code-blocks">
+                <div class="code-block">
+                    <h3>Installation</h3>
+                    <pre><code>conda create -n boxer python=3.12
+conda activate boxer
+pip install 'torch>=2.0' numpy opencv-python tqdm dill
+pip install projectaria-tools          # Aria support
+pip install moderngl moderngl-window 'imgui[glfw]'  # 3D viewer</code></pre>
+                </div>
+                <div class="code-block">
+                    <h3>Download Models & Data</h3>
+                    <pre><code>bash scripts/download_ckpts.sh
+bash scripts/download_aria_data.sh</code></pre>
+                </div>
+                <div class="code-block">
+                    <h3>Run Boxer</h3>
+                    <pre><code># Headless inference (10 frames)
+python run_boxer.py --input nym10_gen1 --max_n=10 --skip_viz
+
+# Interactive prompt demo
+python view_prompt.py --input nym10_gen1
+
+# Offline fusion visualization
+python run_boxer.py --input nym10_gen1 --max_n=100 --skip_viz
+python view_fusion.py --input nym10_gen1
+
+# Online tracker
+python view_tracker.py --input nym10_gen1</code></pre>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Citation Section -->
+    <section class="citation-section">
+        <div class="section-container">
+            <h2 class="section-title">Citation</h2>
+            <p class="section-description">
+                If you find Boxer useful in your research, please consider citing:
+            </p>
+            <div class="citation-box">
+                <pre><code>@misc{boxer2026,
+      title={Boxer: Robust Lifting of Open-World 2D Bounding Boxes to 3D},
+      author={Daniel DeTone and Tianwei Shen and Fan Zhang and Lingni Ma and Julian Straub and Richard Newcombe and Jakob Engel},
+      year={2026},
+}</code></pre>
+                <button class="copy-btn" onclick="copyBibtex()">Copy</button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Resources Section -->
+    <section class="resources-section">
+        <div class="section-container">
+            <h2 class="section-title">Resources</h2>
+            <div class="resources-grid">
+                <a href="https://github.com/facebookresearch/boxer" class="resource-card">
+                    <div class="resource-icon">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                        </svg>
+                    </div>
+                    <h3>GitHub</h3>
+                    <p>Source code, demos, and documentation</p>
+                </a>
+                <a href="https://huggingface.co/facebook/boxer" class="resource-card">
+                    <div class="resource-icon">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                        </svg>
+                    </div>
+                    <h3>HuggingFace</h3>
+                    <p>Model checkpoints and sample data</p>
+                </a>
+                <a href="https://www.projectaria.com/" class="resource-card">
+                    <div class="resource-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <circle cx="12" cy="12" r="4"/>
+                            <line x1="21.17" y1="8" x2="12" y2="8"/>
+                            <line x1="3.95" y1="6.06" x2="8.54" y2="14"/>
+                            <line x1="10.88" y1="21.94" x2="15.46" y2="14"/>
+                        </svg>
+                    </div>
+                    <h3>Project Aria</h3>
+                    <p>Learn about Project Aria devices and tools</p>
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <script src="js/main.js"></script>
+</body>
+</html>
