@@ -114,7 +114,7 @@ python view_prompt.py --input ca1m-val-42898570
 
 You should see a window like this:
 
-<img src="docs/images/ca1m_demo.mp4" alt="CA-1M Demo">
+![CA-1M Prompt](docs/images/ca1m_screenshot.jpg)
 
 ## Demo #6: Running on SUN-RGBD data
 
