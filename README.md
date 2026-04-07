@@ -54,13 +54,17 @@ bash scripts/download_aria_data.sh
 ```
 
 ## Demo #1: Hello World / Run BoxerNet in headless mode
-For this first demo, you do not need to have a display, so it will work if you are SSH'ed into a server. This will run BoxerNet on the first 90 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset. This will confirm we can load up the data and run a few forward passes with the model.
+For this first demo, you do not need to have a display, so it will work if you are SSH'ed into a server. This will run BoxerNet on the first 90 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset. This will confirm we can load up the data and run a forward passes with the model alongside the online tracker.
 
-Expected to take ~1-2 mins on mac MPS, <10 secs on CUDA.
+Expected to take ~2 mins on mac MPS, <15 secs on CUDA.
 
 ```bash
-python run_boxer.py --input nym10_gen1 --max_n=90 --skip_viz
+python run_boxer.py --input nym10_gen1 --max_n=90 --track
 ```
+
+This will dump out static images and a video to outputs/nym10_gen1/, e.g. something like this:
+
+![Run Boxer Demo](docs/images/boxer_viz_current_hohen_gen1.jpg)
 
 ## Demo #2: BoxerNet Interactive Demo on Aria Data
 For this demo, you need to have a valid display to have the GUI work. This demo allows you to create 2DBB prompts and enter text to prompt OWL to detect objects. Run it like:

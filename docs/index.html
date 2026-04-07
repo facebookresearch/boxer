@@ -33,11 +33,12 @@ LICENSE file in the root directory of this source tree. -->
                     <a href="https://github.com/facebookresearch/boxer" class="btn btn-secondary">Code</a>
                 </div>
             </div>
-            <div class="hero-media">
-                <div class="video-container">
-                    <img src="images/hohen_demo.gif" alt="Boxer Demo">
-                </div>
-            </div>
+        </div>
+        <div class="hero-banner">
+            <video autoplay loop muted playsinline>
+                <source src="images/hohen_demo.mp4" type="video/mp4">
+            </video>
+            <p class="hero-banner-caption">(left) 2D bounding boxes (2DBBs) are detected with an open world detector (middle) 2DBBs are lifted and tracked as 3DBBs with BoxerNet (right) 3D view of the tracked 3DBBs</p>
         </div>
     </section>
 
@@ -137,7 +138,9 @@ LICENSE file in the root directory of this source tree. -->
             <div class="code-blocks">
                 <div class="code-block">
                     <h3>Installation</h3>
-                    <pre><code>curl -LsSf https://astral.sh/uv/install.sh | sh  # install uv
+                    <pre><code>git clone https://github.com/facebookresearch/boxer
+cd boxer
+curl -LsSf https://astral.sh/uv/install.sh | sh  # install uv
 uv venv boxer --python 3.12
 source boxer/bin/activate
 uv pip install 'torch>=2.0' numpy opencv-python tqdm dill

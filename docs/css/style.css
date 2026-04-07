@@ -4,18 +4,18 @@
 
 /* ===== CSS Variables ===== */
 :root {
-    --color-bg-black: #000000;
-    --color-bg-primary: #0c0c0f;
-    --color-bg-secondary: #10101a;
-    --color-bg-tertiary: #1a1a25;
-    --color-bg-card: #16161f;
-    --color-text-primary: #ffffff;
-    --color-text-secondary: #a0a0b0;
-    --color-text-muted: #6b6b7b;
+    --color-bg-black: #ffffff;
+    --color-bg-primary: #ffffff;
+    --color-bg-secondary: #f5f5f7;
+    --color-bg-tertiary: #e8e8ed;
+    --color-bg-card: #f9f9fb;
+    --color-text-primary: #1a1a2e;
+    --color-text-secondary: #555566;
+    --color-text-muted: #888899;
     --color-accent: #4f46e5;
     --color-accent-hover: #6366f1;
-    --color-accent-light: rgba(79, 70, 229, 0.1);
-    --color-border: #2a2a3a;
+    --color-accent-light: rgba(79, 70, 229, 0.08);
+    --color-border: #d8d8e0;
     --color-success: #10b981;
     --color-warning: #f59e0b;
 
@@ -150,16 +150,7 @@ button {
     max-width: var(--container-max-width);
     margin: 0 auto;
     padding: 0 var(--spacing-lg);
-    display: grid;
-    gap: var(--spacing-3xl);
-    align-items: center;
-    grid-template-columns: 1.25fr 1fr;
-}
-
-@media (max-width: 1023px) {
-    .hero-container {
-        grid-template-columns: 1fr;
-    }
+    text-align: center;
 }
 
 .hero-title {
@@ -208,35 +199,32 @@ button {
     display: flex;
     gap: var(--spacing-md);
     flex-wrap: wrap;
+    justify-content: center;
 }
 
-.hero-media {
-    position: relative;
-    display: flex;
-    justify-content: right;
-}
-
-@media (max-width: 1023px) {
-    .hero-media {
-        justify-content: center;
-    }
-}
-
-.video-container {
-    position: relative;
-    border-radius: 1.5rem;
+.hero-banner {
+    max-width: var(--container-max-width);
+    margin: var(--spacing-3xl) auto 0;
+    padding: 0 var(--spacing-lg);
+    border-radius: var(--border-radius-lg);
     overflow: hidden;
-    border: 1px solid var(--color-border);
-    display: inline-block;
-    width: 100%;
 }
 
-.video-container video,
-.video-container img {
+.hero-banner-caption {
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+    text-align: center;
+    margin-top: var(--spacing-sm);
+}
+
+.hero-banner img,
+.hero-banner video {
     width: 100%;
-    height: auto;
+    max-height: 300px;
+    object-fit: cover;
     display: block;
-    border-radius: 1.5rem;
+    border-radius: var(--border-radius-lg);
+    border: 1px solid var(--color-border);
 }
 
 /* ===== Section Styles ===== */
@@ -568,11 +556,11 @@ button {
 }
 
 .hero-content,
-.hero-media {
+.hero-banner {
     animation: fadeInUp 0.6s ease-out;
 }
 
-.hero-media {
+.hero-banner {
     animation-delay: 0.2s;
 }
 

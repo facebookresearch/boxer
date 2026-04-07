@@ -6339,7 +6339,7 @@ class TrackerViewer(SequenceOBBViewer):
                     draw_list = imgui.get_window_draw_list()
 
                     # Draw raw per-frame 3DBB projections
-                    if self.show_rgb_obbs and self._rgb_projected_raw_lines:
+                    if self.show_rgb_obbs and self.show_rgb_raw and self._rgb_projected_raw_lines:
                         for (
                             edge_pts,
                             edge_valid,
