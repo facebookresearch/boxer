@@ -453,7 +453,11 @@ def main():
 
         def on_mouse_press_event(self, x, y, button):
             self.imgui.mouse_press_event(x, y, button)
-            # Check image area first (drawing 2D BBs)
+            # Let imgui handle interactive widgets (sliders, buttons, text)
+            # Use is_any_item_hovered to avoid blocking draws on the RGB panel background
+            if imgui.get_io().want_capture_mouse and imgui.is_any_item_hovered():
+                return
+            # Check image area (drawing 2D BBs)
             if button == 1:
                 coords = self._screen_to_image_coords(x, y)
                 if coords is not None:
@@ -463,9 +467,6 @@ def main():
                     self._draw_start_screen = (x, y)
                     self._draw_end_screen = (x, y)
                     return
-            # Let imgui handle interactive widgets (sliders, buttons, text)
-            if imgui.get_io().want_capture_mouse:
-                return
             # 3D viewport — camera controls
             super().on_mouse_press_event(x, y, button)
 
