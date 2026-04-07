@@ -32,9 +32,7 @@ ALWAYS = int(_imgui.Cond_.always)
 # Window flags
 WINDOW_NO_MOVE = int(_imgui.WindowFlags_.no_move)
 WINDOW_NO_RESIZE = int(_imgui.WindowFlags_.no_resize)
-WINDOW_NO_BRING_TO_FRONT_ON_FOCUS = int(
-    _imgui.WindowFlags_.no_bring_to_front_on_focus
-)
+WINDOW_NO_BRING_TO_FRONT_ON_FOCUS = int(_imgui.WindowFlags_.no_bring_to_front_on_focus)
 WINDOW_NO_TITLE_BAR = int(_imgui.WindowFlags_.no_title_bar)
 WINDOW_NO_SCROLLBAR = int(_imgui.WindowFlags_.no_scrollbar)
 WINDOW_ALWAYS_AUTO_RESIZE = int(_imgui.WindowFlags_.always_auto_resize)
@@ -151,9 +149,13 @@ is_item_active = _imgui.is_item_active
 begin_tooltip = _imgui.begin_tooltip
 end_tooltip = _imgui.end_tooltip
 set_keyboard_focus_here = _imgui.set_keyboard_focus_here
+
+
 def set_window_font_scale(scale):
     """No-op: removed in newer Dear ImGui. Use font pushing instead."""
     pass
+
+
 class _DrawListWrapper:
     """Wraps ImDrawList to accept raw floats instead of ImVec2."""
 
@@ -165,7 +167,12 @@ class _DrawListWrapper:
 
     def add_rect(self, x1, y1, x2, y2, col, rounding=0.0, flags=0, thickness=1.0):
         self._dl.add_rect(
-            _imgui.ImVec2(x1, y1), _imgui.ImVec2(x2, y2), col, rounding, flags, thickness
+            _imgui.ImVec2(x1, y1),
+            _imgui.ImVec2(x2, y2),
+            col,
+            rounding,
+            flags,
+            thickness,
         )
 
     def add_rect_filled(self, x1, y1, x2, y2, col, rounding=0.0, flags=0):
@@ -186,6 +193,7 @@ def get_foreground_draw_list():
 
 def get_window_draw_list():
     return _DrawListWrapper(_imgui.get_window_draw_list())
+
 
 # ImVec2 re-export for direct use
 ImVec2 = _imgui.ImVec2

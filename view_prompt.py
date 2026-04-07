@@ -68,7 +68,7 @@ def main():
     # fmt: off
     parser = argparse.ArgumentParser(description="Interactive 2D BB prompting with BoxerNet")
     add_common_args(parser)
-    parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "boxernet_hw960in2x6d768.ckpt"), help="BoxerNet checkpoint")
+    parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "boxernet_hw960in4x6d768-wssxpf9p.ckpt"), help="BoxerNet checkpoint")
     parser.add_argument("--force_precision", type=str, default=None, choices=["float32", "bfloat16"])
     parser.add_argument("--force_cpu", action="store_true")
     # fmt: on

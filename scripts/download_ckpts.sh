@@ -12,7 +12,7 @@ CKPT_DIR="ckpts"
 BASE_URL="https://huggingface.co/facebook/boxer/resolve/main"
 
 FILES=(
-    "boxernet_hw960in2x6d768.ckpt"
+    "boxernet_hw960in4x6d768-wssxpf9p.ckpt"
     "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth"
     "owlv2-base-patch16-ensemble.pt"
 )

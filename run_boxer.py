@@ -111,7 +111,7 @@ def main():
     parser.add_argument("--gt2d", action="store_true", help="use GT pseudo 2DBB as input")
     parser.add_argument("--fuse", action="store_true", help="run offline 3D box fusion after processing")
     parser.add_argument("--track", action="store_true", help="run online 3D box tracking and show tracked boxes in Top Down View")
-    parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "boxernet_hw960in2x6d768.ckpt"), help="path to BoxerNet checkpoint")
+    parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "boxernet_hw960in4x6d768-wssxpf9p.ckpt"), help="path to BoxerNet checkpoint")
     parser.add_argument("--force_precision", type=str, default=None, choices=["float32", "bfloat16"], help="Override auto-detected inference precision")
     parser.add_argument("--output_dir", type=str, default=EVAL_PATH, help="Output directory for results (default: output/)")
     args = parser.parse_args()
@@ -717,7 +717,7 @@ def main():
                         for t in active_tracks
                     ]
                     track_texts = [
-                        f"{t.cached_text[:10]} (conf_track={t.accumulated_weight / max(t.support_count, 1):.2f})"
+                        f"{t.cached_text[:10]} {t.accumulated_weight / max(t.support_count, 1):.2f}"
                         for t in active_tracks
                     ]
                     viz_track = draw_bb3s(

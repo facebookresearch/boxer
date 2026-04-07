@@ -81,8 +81,8 @@ class CALoader(BaseLoader):
         remove_structure=True,
         remove_large=True,
         min_dim=0.05,
-        num_samples=100000,         # per-frame: dense for BoxerNet input
-        num_samples_global=10000,   # global cloud: sparse for viewer
+        num_samples=100000,  # per-frame: dense for BoxerNet input
+        num_samples_global=10000,  # global cloud: sparse for viewer
     ):
         seq_name = seq_name.strip("/")
         # Find the extracted data directory.

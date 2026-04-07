@@ -138,13 +138,19 @@ class OrbitViewer(mglw.WindowConfig):
             style = imgui.get_style()
             # Manually scale style sizes since scale_all_sizes() may not be available
             wp = style.window_padding
-            style.window_padding = imgui.ImVec2(wp.x * scale_factor, wp.y * scale_factor)
+            style.window_padding = imgui.ImVec2(
+                wp.x * scale_factor, wp.y * scale_factor
+            )
             fp = style.frame_padding
             style.frame_padding = imgui.ImVec2(fp.x * scale_factor, fp.y * scale_factor)
             isp = style.item_spacing
-            style.item_spacing = imgui.ImVec2(isp.x * scale_factor, isp.y * scale_factor)
+            style.item_spacing = imgui.ImVec2(
+                isp.x * scale_factor, isp.y * scale_factor
+            )
             iisp = style.item_inner_spacing
-            style.item_inner_spacing = imgui.ImVec2(iisp.x * scale_factor, iisp.y * scale_factor)
+            style.item_inner_spacing = imgui.ImVec2(
+                iisp.x * scale_factor, iisp.y * scale_factor
+            )
             style.scrollbar_size *= scale_factor
             style.grab_min_size *= scale_factor
         else:
@@ -4630,7 +4636,10 @@ class TrackerViewer(SequenceOBBViewer):
         self._vertex_buf[:, 3:] = color_val
         any_inside = None
 
-        if self._track_obbs_for_pts is not None and self._track_colors_for_pts is not None:
+        if (
+            self._track_obbs_for_pts is not None
+            and self._track_colors_for_pts is not None
+        ):
             M = len(self._track_obbs_for_pts)
             pts_expanded = self._pts_torch.unsqueeze(0).expand(M, -1, -1)
             inside_batch = self._track_obbs_for_pts.batch_points_inside_bb3(
@@ -5369,7 +5378,9 @@ class TrackerViewer(SequenceOBBViewer):
                 shown_track_obbs = torch.stack([t.obb for t in shown_tracks])
                 t_colors = self._obbs_random_colors(shown_track_obbs).cpu()
             else:  # Health (default)
-                health_colors_rgba = _jet_colormap(np.array(health_scores))[:, :3]  # (M, 3)
+                health_colors_rgba = _jet_colormap(np.array(health_scores))[
+                    :, :3
+                ]  # (M, 3)
                 t_colors = torch.from_numpy(health_colors_rgba.astype(np.float32))
 
             label_colors = [t_colors[i].numpy() for i in range(M)]
@@ -5541,7 +5552,10 @@ class TrackerViewer(SequenceOBBViewer):
         # Update observed semidense points for this frame.
         # ScanNet currently uses per-frame observed points only (no global cloud),
         # so point_count can remain 0 while observed points are still available.
-        if self._point_positions is not None or getattr(self, "_data_source", None) == "scannet":
+        if (
+            self._point_positions is not None
+            or getattr(self, "_data_source", None) == "scannet"
+        ):
             self._update_observed_points(nav_ts)
 
         # Recolor global point cloud by tracked box colors
@@ -5826,9 +5840,7 @@ class TrackerViewer(SequenceOBBViewer):
             self.point_prog["point_size"].write(
                 np.array(self.point_size * 2.0, dtype="f4").tobytes()
             )
-            self.point_prog["alpha"].write(
-                np.array(1.0, dtype="f4").tobytes()
-            )
+            self.point_prog["alpha"].write(np.array(1.0, dtype="f4").tobytes())
             self.point_inside_vao.render(
                 mode=self.ctx.POINTS, vertices=self.point_inside_count
             )
