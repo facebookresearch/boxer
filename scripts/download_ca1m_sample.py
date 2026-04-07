@@ -130,8 +130,13 @@ def main():
             print("Use --force to re-download.")
             return
 
-    print("NOTE: CA-1M data is released under CC-by-NC-ND 4.0.")
+    print("NOTE: CA-1M data is released under CC-BY-NC-ND 4.0.")
     print("      https://creativecommons.org/licenses/by-nc-nd/4.0/")
+    print()
+    answer = input("Do you accept the CA-1M license terms? [y/N] ").strip().lower()
+    if answer != "y":
+        print("License not accepted. Aborting.")
+        sys.exit(0)
     print()
 
     os.makedirs(seq_dir, exist_ok=True)
@@ -168,7 +173,7 @@ def main():
     if verify_extracted(seq_dir):
         print(f"\nDone! Sequence ready at: {seq_dir}")
         print("\nRun Boxer on it:")
-        print(f"  python run_boxer.py --input {seq_name}")
+        print(f"  python run_boxer.py --input {seq_name} --max_n=100")
     else:
         print("\nWarning: extracted directory structure looks incomplete.")
         sys.exit(1)

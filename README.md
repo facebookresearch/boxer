@@ -1,6 +1,6 @@
 ##  Boxer: Robust Lifting of Open-World 2D Bounding Boxes to 3D
 
-![Boxer System Architecture](docs/assets/boxer_system.jpg)
+![Boxer System Architecture](docs/images/boxer_system.jpg)
 
 Boxer lifts 2D object detections into static, global, fused 3D oriented bounding boxes (OBBs) from posed images and semi-dense point clouds, focused on indoor object detection. This repo contains the code and pre-trained model (no training code) needed to run Boxer on a variety of input data sources (inference only code).
 
@@ -47,16 +47,16 @@ In this repo, we provide sample code for running on the following data sources:
 * SUN-RGBD
 * ScanNet (manual download needed)
 
-Lets first start with Aria data. We host three sample [Project Aria](https://www.projectaria.com/) sequences (hohen_gen1, nym10_gen1, cook0_gen2) on [HuggingFace](https://huggingface.co/datasets/facebook/boxer). Download them to the `sample_data/` directory:
+Let's first start with Aria data. We host three sample [Project Aria](https://www.projectaria.com/) sequences (hohen_gen1, nym10_gen1, cook0_gen2) on [HuggingFace](https://huggingface.co/datasets/facebook/boxer). Download them to the `sample_data/` directory:
 
 ```bash
 bash scripts/download_aria_data.sh
 ```
 
 ## Demo #1: Hello World / Run BoxerNet in headless mode
-For this first demo, you do not need to have a display, so it will work if you are SSH'ed into a server. This will run BoxerNet on the first 10 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset. This will confirm we can load up the data and run a few forward passes with the model.
+For this first demo, you do not need to have a display, so it will work if you are SSH'ed into a server. This will run BoxerNet on the first 90 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset. This will confirm we can load up the data and run a few forward passes with the model.
 
-Expected to takes ~1-2 mins on mac MPS, <10 secs on CUDA.
+Expected to take ~1-2 mins on mac MPS, <10 secs on CUDA.
 
 ```bash
 python run_boxer.py --input nym10_gen1 --max_n=90 --skip_viz
@@ -70,7 +70,7 @@ python view_prompt.py --input nym10_gen1
 
 You should see a window that looks like this:
 
-![View Prompt Demo](docs/assets/view_prompt_demo.jpg)
+![View Prompt Demo](docs/images/view_prompt_demo.jpg)
 
 You can also run it on the other Project Aria sequences:
 * python view_prompt.py --input hohen_gen1
@@ -82,7 +82,7 @@ Make sure to run Demo #1 first. This generates 2DBB and 3DBB csv files, for exam
 * output/nym10_gen1/boxer_3dbbs.csv
 * output/nym10_gen1/owl_2dbbs.csv
 
-Then, run the fusion script, which will by default search the above paths, to load and fuse the 3DBBs from above
+Then, run the fusion script, which will by default search the above paths, to load and fuse the 3DBBs from above.
 
 ```bash
 python view_fusion.py --input nym10_gen1
@@ -90,9 +90,9 @@ python view_fusion.py --input nym10_gen1
 
 You should see a window like this:
 
-![View Fusion Demo](docs/assets/view_fusion_demo.jpg)
+![View Fusion Demo](docs/images/view_fusion_demo.jpg)
 
-## Demo #4: Online Tracker (requires demo #3)
+## Demo #4: Online Tracker (requires Demo #1)
 
 Make sure to run Demo #1 above first to generate the 2DBB and 3DBB CSVs. Run the online tracker, which will estimate 3DBBs on the fly as new images are observed:
 
@@ -102,22 +102,39 @@ python view_tracker.py --input nym10_gen1 --autoplay
 
 ## Demo #5: Running on CA-1M data
 
+Extract a sample validation sequence (ca1m-val-42898570) to sample_data/
 ```bash
-# CA-1M: extract a sample sequence to sample_data/
 python scripts/download_ca1m_sample.py
 ```
 
-## Download Other Data Samples
-
-We provide helper scripts to set up additional data sources:
-
+Run the view_prompt.py script on it:
 ```bash
-# Omni3D SUN-RGBD: extract 20 sample images to sample_data/
-python scripts/download_omni3d_sample.py
-
-# ScanNet: manually download from https://github.com/scannet/scannet
-# then place the scene directory in sample_data/, e.g. sample_data/scene0707_00
+python view_prompt.py --input ca1m-val-42898570
 ```
+
+You should see a window like this:
+
+![CA-1M Prompt](docs/images/ca1m_screenshot.jpg)
+
+## Demo #6: Running on SUN-RGBD data
+
+Download a subset of Omni3D SUN-RGBD: extract 20 sample images to sample_data/
+```bash
+python scripts/download_omni3d_sample.py
+```
+
+Run the view_prompt.py script on it:
+```bash
+python view_prompt.py --input SUNRGBD
+```
+
+You should see a window like this:
+
+![SUNRGBD Prompt](docs/images/sunrgbd_screenshot.jpg)
+
+## Running on ScanNet
+
+ScanNet must be manually downloaded from https://github.com/scannet/scannet. Once you do that, place the scene directory in sample_data/, e.g. sample_data/scene0707_00, and run just like the above examples.
 
 ## run_boxer.py Usage Details
 
@@ -209,7 +226,6 @@ boxer/
 │   ├── download_aria_data.sh # Download sample Aria sequences
 │   ├── download_ca1m_sample.py      # Extract CA-1M sample data
 │   ├── download_omni3d_sample.py    # Extract Omni3D SUN-RGBD sample
-│   └── download_scannet_sample.py   # Download ScanNet sample data
 ├── tests/                    # Unit tests (see tests/README.md)
 └── utils/
     ├── viewer_3d.py          # Interactive 3D visualization + viewer classes
@@ -242,13 +258,13 @@ For lifting a video sequence we need the same as above plus:
 
 ## FAQ
 
-Q: Can I run it on an arbitrary image without any other info?
+**Q: Can I run it on an arbitrary image without any other info?**
 A: Theoretically yes, but you would need to estimate the intrinsics and gravity direction. We didn't test that.
 
-Q: Do you plan to release the training or evaluation code?
-A: No, we do not, because that would require more long term maintenance from the authors. You can email the first author or leave a github issue if you have any questions about re-implementing these, but our response may be slow.
+**Q: Do you plan to release the training or evaluation code?**
+A: No, we do not, because that would require more long-term maintenance from the authors. You can email the first author or leave a GitHub issue if you have any questions about re-implementing the training/evaluation pipeline, but our response may be slow.
 
-Q: Does it work on a Windows machine?
+**Q: Does it work on a Windows machine?**
 A: We did not test it, but running the core model should work.
 
 
@@ -257,7 +273,7 @@ A: We did not test it, but running the core model should work.
 We use [ruff](https://docs.astral.sh/ruff/) for linting and formatting:
 
 ```bash
-pip install ruff
+uv pip install ruff
 
 # Check for lint errors
 ruff check .
@@ -272,7 +288,7 @@ ruff format .
 ## Testing
 
 ```bash
-pip install pytest pytest-cov
+uv pip install pytest pytest-cov
 
 # Run all tests
 bash tests/run_tests.sh
