@@ -107,8 +107,6 @@ python view_tracker.py --input nym10_gen1 --autoplay
 python scripts/download_ca1m_sample.py
 ```
 
-
-
 ## Download Other Data Samples
 
 We provide helper scripts to set up additional data sources:

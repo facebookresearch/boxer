@@ -33,6 +33,7 @@ import os
 import sys
 import tarfile
 import tempfile
+import ssl
 import urllib.request
 
 CA1M_URL = (
@@ -59,6 +60,11 @@ def download_file(url: str, dest: str) -> None:
             sys.stdout.write(f"\r  {mb:.1f}/{total_mb:.1f} MB ({pct}%)")
             sys.stdout.flush()
 
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+    urllib.request.install_opener(opener)
     urllib.request.urlretrieve(url, dest, reporthook=_progress)
     print()  # newline after progress
 
