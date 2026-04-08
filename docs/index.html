@@ -60,7 +60,7 @@ LICENSE file in the root directory of this source tree. -->
         <div class="section-container">
             <h2 class="section-title">How It Works</h2>
             <p class="section-description">
-                Boxer uses a two-stage pipeline. First, an open-vocabulary 2D detector (OWLv2) finds objects in each frame. Then, BoxerNet lifts each 2D detection into a 3D oriented bounding box using camera intrinsics, gravity direction, and optional semi-dense depth. Detections across frames can be fused offline or tracked online for temporal consistency.
+                Boxer uses a three-stage pipeline. First, an open-vocabulary 2D detector (OWLv2) finds objects in each frame. Then, BoxerNet lifts each 2D detection into a 3D oriented bounding box using camera intrinsics, gravity direction, and optional semi-dense depth. Finally, detections across frames can be fused offline or tracked online for temporal consistency.
             </p>
             <div class="process-steps">
                 <div class="step">
