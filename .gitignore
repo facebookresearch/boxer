@@ -1,0 +1,38 @@
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+.coverage
+tests/htmlcov/
+htmlcov/
+
+# Environment
+.env
+*.egg
+
+# Checkpoints
+ckpts/
+
+# Sample data
+sample_data/
+
+# Visualization output
+output/
+
+# ImGui
+imgui.ini

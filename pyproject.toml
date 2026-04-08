@@ -1,0 +1,10 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+exclude = ["tests/htmlcov"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = [
+    "E741",  # ambiguous variable name (common in DL: x, l, I, etc.)
+]
