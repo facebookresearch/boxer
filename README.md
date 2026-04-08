@@ -47,7 +47,7 @@ In this repo, we provide sample code for running on the following data sources:
 * SUN-RGBD
 * ScanNet (manual download needed)
 
-Let's first start with Aria data. We host three sample [Project Aria](https://www.projectaria.com/) sequences (hohen_gen1, nym10_gen1, cook0_gen2) on [HuggingFace](https://huggingface.co/datasets/facebook/boxer). Download them to the `sample_data/` directory:
+Let's first start with Aria data. We host three sample [Project Aria](https://www.projectaria.com/) sequences (hohen_gen1, nym10_gen1, cook0_gen2) on [HuggingFace](https://huggingface.co/datasets/facebook/boxer). This requires 700 MB of disk space. Download them to the `sample_data/` directory:
 
 ```bash
 bash scripts/download_aria_data.sh
