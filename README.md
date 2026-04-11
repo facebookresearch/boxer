@@ -13,7 +13,7 @@ Boxer lifts 2D object detections into static, global, fused 3D oriented bounding
 
 ### Docker
 
-Tested on a Ubuntu 24.04 Host Machine running a NVIDIA GPU with driver version *580.126.09*
+Tested on a Ubuntu 24.04 Host Machine running a NVIDIA GPU with driver version *580.126.09* and the NVIDIA Container Toolkit version *1.19.0*.
 
 #### Requirements
 
