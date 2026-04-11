@@ -1,0 +1,38 @@
+services:
+  boxer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: boxer
+
+    # Pass through GPU access
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+
+    volumes:
+      # Checkpoints
+      - ../ckpts:/boxer/ckpts
+
+      # Sample data
+      - ../sample_data:/boxer/sample_data
+
+      # Visualization output
+      - ../output:/boxer/output
+
+      # x11 unix socket
+      - /tmp/.X11-unix:/tmp/.X11-unix
+
+    network_mode: host
+
+    stdin_open: true
+    tty: true
