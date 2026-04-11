@@ -19,6 +19,8 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
 
+    user: "${UID:-1000}:${GID:-1000}"
+
     volumes:
       # Checkpoints
       - ../ckpts:/boxer/ckpts
