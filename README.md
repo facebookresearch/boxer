@@ -317,6 +317,10 @@ boxer/
 ├── run_boxer.py              # Main entry point (headless detection + lifting)
 ├── view_prompt.py            # Interactive demo (2D prompts + OWL text detection)
 ├── view_fusion.py            # View pre-computed 3D bounding boxes
+├── docker/
+│   ├── Dockerfile            # Docker image definition
+│   ├── docker-compose.yml    # Compose config
+│   └── entrypoint.sh         # Container entrypoint
 ├── boxernet/
 │   ├── boxernet.py           # BoxerNet model (encode → cross-attend → predict)
 │   └── dinov3_wrapper.py     # DINOv3 backbone wrapper
@@ -330,6 +334,7 @@ boxer/
 │   ├── omni_loader.py        # Omni3D dataset loader
 │   └── scannet_loader.py     # ScanNet dataset loader
 ├── scripts/
+│   ├── boxer_docker.sh       # Docker helper script for running commands in the container
 │   ├── download_ckpts.sh     # Download model checkpoints
 │   ├── download_aria_data.sh # Download sample Aria sequences
 │   ├── download_ca1m_sample.py      # Extract CA-1M sample data
