@@ -6009,7 +6009,12 @@ class TrackerViewer(SequenceOBBViewer):
         n = self._record_frame_idx
         print(f"[REC] Recording stopped — {n} frames captured")
         if n > 0:
-            output_dir = os.path.expanduser("~/Desktop")
+            output_dir = os.path.join(os.path.expanduser(EVAL_PATH), self._seq_name)
+            os.makedirs(output_dir, exist_ok=True)
+            # fallback to ~/Desktop
+            if not os.path.isdir(output_dir):
+                desktop = os.path.expanduser("~/Desktop")
+                output_dir = desktop if os.path.isdir(desktop) else os.path.expanduser("~")
             base_name = f"viz_tracker_{self._seq_name}"
             output_name = f"{base_name}.mp4"
             out_path = os.path.join(output_dir, output_name)
