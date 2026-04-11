@@ -11,6 +11,33 @@ Boxer lifts 2D object detections into static, global, fused 3D oriented bounding
 
 ## Installation
 
+### Docker
+
+Tested on a Ubuntu 24.04 Host Machine running a NVIDIA GPU with driver version *580.126.09*
+
+#### Requirements
+
+- [Docker](https://docs.docker.com/get-docker/)
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+
+#### Usage
+
+```bash
+# build the image (only needed once)
+docker build -f docker/Dockerfile -t boxer .
+
+# use the helper script to enter the container
+bash scripts/boxer_docker.sh
+bash scripts/boxer_docker.sh --help
+
+# OR: run a command directly without entering the container
+bash scripts/boxer_docker.sh python run_boxer.py --input nym10_gen1 --skip_viz
+```
+
+> Note: Model checkpoints and sample Aria data are **downloaded automatically on first run** and cached in `ckpts/` and `sample_data/` on your host.
+
+### Local install
+
 We tested on MacOS (with mps acceleration) and Fedora (with CUDA acceleration).
 
 ```bash
@@ -38,6 +65,14 @@ We host model checkpoints for BoxerNet, DinoV3 and OWLv2 on [HuggingFace](https:
 ```bash
 bash scripts/download_ckpts.sh
 ```
+<details><summary>Docker</summary>
+
+Not necessarily needed, since the [scripts/boxer_docker.sh](scripts/boxer_docker.sh) helper script automatically mounts the *ckpts/* directory and downloads the checkpoints on first run, but if you want to download the checkpoints directly, you can run:
+
+```bash
+bash scripts/boxer_docker.sh bash scripts/download_ckpts.sh
+```
+</details>
 
 ## Download Sample Project Aria Data
 
@@ -53,6 +88,15 @@ Let's first start with Aria data. We host three sample [Project Aria](https://ww
 bash scripts/download_aria_data.sh
 ```
 
+<details><summary>Docker</summary>
+
+Not necessarily needed, since the [scripts/boxer_docker.sh](scripts/boxer_docker.sh) helper script automatically mounts the *sample_data/* directory and downloads the data on first run, but if you want to download the data directly, you can run:
+
+```bash
+bash scripts/boxer_docker.sh bash scripts/download_aria_data.sh
+```
+</details>
+
 ## Demo #1: Hello World / Run BoxerNet in headless mode
 For this first demo, you do not need to have a display, so it will work if you are SSH'ed into a server. This will run BoxerNet on the first 90 images of a sequence from the test set of the [NymeriaPlus](https://arxiv.org/abs/2603.18496v1) dataset. This will confirm we can load up the data and run a forward passes with the model alongside the online tracker.
 
@@ -61,6 +105,13 @@ Expected to take ~2 mins on mac MPS, <15 secs on CUDA.
 ```bash
 python run_boxer.py --input nym10_gen1 --max_n=90 --track
 ```
+
+<details><summary>Docker</summary>
+
+```bash
+bash scripts/boxer_docker.sh python run_boxer.py --input nym10_gen1 --max_n=90 --track
+```
+</details>
 
 This will dump out static images and a video to `outputs/nym10_gen1/`, e.g. something like this in `outputs/nym10_gen1/boxer_viz_current.png`
 
@@ -71,6 +122,13 @@ For this demo, you need to have a valid display to have the GUI work. This demo 
 ```bash
 python view_prompt.py --input nym10_gen1
 ```
+
+<details><summary>Docker</summary>
+
+```bash
+bash scripts/boxer_docker.sh python view_prompt.py --input nym10_gen1
+```
+</details>
 
 You should see a window that looks like this:
 
@@ -92,6 +150,13 @@ Then, run the fusion script, which will by default search the above paths, to lo
 python view_fusion.py --input nym10_gen1
 ```
 
+<details><summary>Docker</summary>
+
+```bash
+bash scripts/boxer_docker.sh python view_fusion.py --input nym10_gen1
+```
+</details>
+
 You should see a window like this:
 
 ![View Fusion Demo](docs/images/view_fusion_demo.jpg)
@@ -104,6 +169,13 @@ Make sure to run Demo #1 above first to generate the 2DBB and 3DBB CSVs. Run the
 python view_tracker.py --input nym10_gen1 --autoplay
 ```
 
+<details><summary>Docker</summary>
+
+```bash
+bash scripts/boxer_docker.sh python view_tracker.py --input nym10_gen1 --autoplay
+```
+</details>
+
 ## Demo #5: Running on CA-1M data
 
 Extract a sample validation sequence (ca1m-val-42898570) to sample_data/
@@ -115,6 +187,14 @@ Run the view_prompt.py script on it:
 ```bash
 python view_prompt.py --input ca1m-val-42898570
 ```
+
+<details><summary>Docker</summary>
+
+```bash
+bash scripts/boxer_docker.sh python scripts/download_ca1m_sample.py
+bash scripts/boxer_docker.sh python view_prompt.py --input ca1m-val-42898570
+```
+</details>
 
 You should see a window like this:
 
@@ -132,6 +212,14 @@ Run the view_prompt.py script on it:
 python view_prompt.py --input SUNRGBD
 ```
 
+<details><summary>Docker</summary>
+
+```bash
+bash scripts/boxer_docker.sh python scripts/download_omni3d_sample.py
+bash scripts/boxer_docker.sh python view_prompt.py --input SUNRGBD
+```
+</details>
+
 You should see a window like this:
 
 ![SUNRGBD Prompt](docs/images/sunrgbd_screenshot.jpg)
@@ -145,6 +233,14 @@ Run just like the above examples:
 ```bash
 python view_prompt.py --input scene0707_00
 ```
+
+<details><summary>Docker</summary>
+
+```bash
+# Place the scene directory in sample_data/ on the host first (e.g. sample_data/scene0707_00)
+bash scripts/boxer_docker.sh python view_prompt.py --input scene0707_00
+```
+</details>
 
 ![ScanNet Prompt](docs/images/scannet_screenshot.jpg)
 
