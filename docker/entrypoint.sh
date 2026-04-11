@@ -22,4 +22,8 @@ if [ ! -f "$DATA_SENTINEL" ]; then
     echo "INFO: Sample data downloaded to $DATA_DIR/"
 fi
 
+if [ -n "${HOST_UID:-}" ] && [ -n "${HOST_GID:-}" ]; then
+    chown -R "$HOST_UID:$HOST_GID" /boxer/ckpts /boxer/sample_data /boxer/output 2>/dev/null || true
+fi
+
 exec "$@"

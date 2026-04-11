@@ -18,6 +18,12 @@ EOF
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$SCRIPT_DIR/.."
+
+export BOXER_UID=$(id -u)
+export BOXER_GID=$(id -g)
+
+mkdir -p "$ROOT_DIR/ckpts" "$ROOT_DIR/sample_data" "$ROOT_DIR/output"
 
 XHOST_GRANTED=false
 if [ -n "$DISPLAY" ]; then

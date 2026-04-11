@@ -18,8 +18,8 @@ services:
       - DISPLAY=${DISPLAY:-:0}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
-
-    user: "${UID:-1000}:${GID:-1000}"
+      - HOST_UID=${BOXER_UID:-1000}
+      - HOST_GID=${BOXER_GID:-1000}
 
     volumes:
       # Checkpoints

@@ -29,7 +29,7 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 # Create virtual environment with uv
 WORKDIR /boxer
-RUN uv venv /boxer/venv --python python3.12
+RUN uv venv /boxer/venv --python python3.12 --seed
 ENV VIRTUAL_ENV=/boxer/venv
 ENV PATH="/boxer/venv/bin:${PATH}"
 
@@ -50,6 +50,8 @@ RUN uv pip install \
   moderngl-window \
   imgui-bundle
 
+# test deps
+RUN uv pip install pytest pytest-cov
 
 COPY . /boxer
 RUN chmod +x /boxer/docker/entrypoint.sh
