@@ -29,6 +29,7 @@ from boxernet.boxernet import BoxerNet, sdp_to_patches
 from owl.owl_wrapper import OwlWrapper
 from utils.demo_utils import CKPT_PATH
 from utils.image import render_depth_patches
+from utils.viser_viewer import run_viser_prompt_viewer
 from utils.tw.camera import CameraTW
 from utils.tw.obb import BB3D_LINE_ORDERS, ObbTW
 from utils.tw.tensor_utils import find_nearest2
@@ -71,6 +72,9 @@ def main():
     parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "boxernet_hw960in4x6d768-wssxpf9p.ckpt"), help="BoxerNet checkpoint")
     parser.add_argument("--force_precision", type=str, default=None, choices=["float32", "bfloat16"])
     parser.add_argument("--force_cpu", action="store_true")
+    parser.add_argument("--viewer_backend", type=str, default="local", choices=["local", "viser"], help="Viewer backend")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Viser host")
+    parser.add_argument("--port", type=int, default=8080, help="Viser port")
     # fmt: on
     args = parser.parse_args()
 
@@ -134,6 +138,20 @@ def main():
         empty_timed_obbs = {int(ts): empty_obb for ts in frame_ts}
     else:
         empty_timed_obbs = {int(ts): empty_obb for ts in seq_ctx["rgb_timestamps"]}
+
+    if args.viewer_backend == "viser":
+        run_viser_prompt_viewer(
+            empty_timed_obbs,
+            seq_name=seq_name,
+            seq_ctx=seq_ctx,
+            boxernet=boxernet,
+            owl=owl,
+            device=device,
+            precision_dtype=precision_dtype,
+            host=args.host,
+            port=args.port,
+        )
+        return
 
     default_w, default_h = 2250 * scale_factor, 1100 * scale_factor
     init_w = args.window_w if args.window_w > 0 else default_w
@@ -1348,19 +1366,23 @@ def main():
                 imgui.same_line()
                 slider_w = max(200, win_w - 600)
                 imgui.push_item_width(slider_w)
+                display_frame_idx = self.current_frame_idx + 1
                 changed, new_frame = imgui.slider_int(
-                    "##frame",
-                    self.current_frame_idx,
-                    0,
-                    max(0, self.total_frames - 1),
+                    "Image Index##frame",
+                    display_frame_idx,
+                    1,
+                    max(1, self.total_frames),
                 )
                 if changed:
                     self.is_playing = False
                     if self.follow_view:
                         self._focus_on_current_frame()
                         self.follow_view = False
-                    self._step_to_frame(new_frame)
+                    self._step_to_frame(new_frame - 1)
                 imgui.pop_item_width()
+
+                imgui.same_line()
+                imgui.text(f"{display_frame_idx}/{self.total_frames}")
 
                 imgui.same_line()
                 imgui.push_item_width(120)

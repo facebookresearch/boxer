@@ -29,7 +29,25 @@ uv pip install projectaria-tools
 
 # 3D interactive viewer for view_*.py scripts
 uv pip install moderngl moderngl-window imgui-bundle
+
+# (Optional) Browser-based remote viewer backend
+uv pip install 'viser>=0.2.23'
 ```
+
+For remote servers (SSH/headless), you can use the browser-based viewer backend:
+
+```bash
+# Example: tracker viewer over HTTP
+python view_tracker.py --input nym10_gen1 --viewer_backend viser --host 0.0.0.0 --port 8080
+
+# Example: fusion viewer over HTTP
+python view_fusion.py --input nym10_gen1 --viewer_backend viser --host 0.0.0.0 --port 8080
+
+# Example: prompt viewer over HTTP
+python view_prompt.py --input nym10_gen1 --viewer_backend viser --host 0.0.0.0 --port 8080
+```
+
+Then open `http://<server-ip>:8080` in your browser.
 
 ## Download Model Checkpoints
 
