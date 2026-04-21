@@ -21,11 +21,11 @@ Usage:
 import argparse
 import json
 import os
+import ssl
 import struct
 import subprocess
 import sys
 import tempfile
-import ssl
 import urllib.request
 import zipfile
 import zlib

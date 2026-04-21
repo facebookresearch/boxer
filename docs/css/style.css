@@ -166,6 +166,13 @@ button {
     background-clip: text;
 }
 
+.hero-title-emoji {
+    background: none;
+    -webkit-background-clip: initial;
+    -webkit-text-fill-color: initial;
+    background-clip: initial;
+}
+
 @media (min-width: 768px) {
     .hero-title {
         font-size: var(--font-size-5xl);
