@@ -96,6 +96,25 @@ You should see a window like this:
 
 ![View Fusion Demo](docs/images/view_fusion_demo.jpg)
 
+## Demo #3.5: Diagnose 3D output quality without ground truth
+
+Useful when you've plugged in a custom dataset loader or captured your own
+sequence and want to know whether the 3D boxes look right — without any
+ground-truth annotations.
+
+```bash
+python diagnose_boxer_output.py --input nym10_gen1
+python diagnose_boxer_output.py --input nym10_gen1 --filter
+```
+
+Computes three geometric self-consistency metrics per 3D box
+(distance-to-cloud, reprojection-IoU vs. OWL 2D bbox, depth-gap vs. SDP
+inside the 2D bbox) and writes `diagnose_by_box.csv` +
+`diagnose_summary.json` to the output dir. With `--filter`, writes a
+`*_3dbbs_filtered.csv` that `fuse_3d_boxes.fuse_obbs_from_csv` can
+consume for a cleaner fused scene graph. See the top of
+`diagnose_boxer_output.py` for what each metric catches.
+
 ## Demo #4: Online Tracker (requires Demo #1)
 
 Make sure to run Demo #1 above first to generate the 2DBB and 3DBB CSVs. Run the online tracker, which will estimate 3DBBs on the fly as new images are observed:
