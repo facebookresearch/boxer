@@ -1,0 +1,35 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Environment
+.env
+*.egg
+boxer/
+
+# Version control
+.git/
+.gitignore
+
+# Coverage
+.coverage
+tests/htmlcov/
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Checkpoints
+ckpts/
+
+# Sample data
+sample_data/
+
+# Visualization output
+output/
