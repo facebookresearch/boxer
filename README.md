@@ -5,7 +5,7 @@
 Boxer lifts 2D object detections into static, global, fused 3D oriented bounding boxes (OBBs) from posed images and semi-dense point clouds, focused on indoor object detection. This repo contains the code and pre-trained model (no training code) needed to run Boxer on a variety of input data sources (inference only code).
 
 
-[Project Page](https://facebookresearch.github.io/boxer)  |  [ArXiv](https://arxiv.org/abs/2604.05212) | [Video](https://youtu.be/YtZD4A70RN4)  |  [HF-Model](https://huggingface.co/facebook/boxer)  |  [HF-Data](https://huggingface.co/datasets/facebook/boxer)  |  [Code](https://github.com/facebookresearch/boxer)
+[Project Page](https://facebookresearch.github.io/boxer)  |  [ArXiv](https://arxiv.org/abs/2604.05212) | [Video](https://youtu.be/YtZD4A70RN4)  |  [HF-Model](https://huggingface.co/facebook/boxer)  |  [HF-Data](https://huggingface.co/datasets/facebook/boxer)  |  [GitHub Code](https://github.com/facebookresearch/boxer)
 
 
 

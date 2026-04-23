@@ -21,10 +21,10 @@ import os
 import time
 
 import cv2
-import utils.imgui_compat as imgui
 import numpy as np
 import torch
 
+import utils.imgui_compat as imgui
 from boxernet.boxernet import BoxerNet, sdp_to_patches
 from owl.owl_wrapper import OwlWrapper
 from utils.demo_utils import CKPT_PATH

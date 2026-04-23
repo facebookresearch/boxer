@@ -30,10 +30,10 @@ More info: https://github.com/apple/ml-cubifyanything
 import argparse
 import glob
 import os
+import ssl
 import sys
 import tarfile
 import tempfile
-import ssl
 import urllib.request
 
 CA1M_URL = (

@@ -57,9 +57,10 @@ if platform.system() == "Darwin":
     except Exception:
         pass
 
-import utils.imgui_compat as imgui
 import moderngl_window as mglw
 import numpy as np
+
+import utils.imgui_compat as imgui
 from utils.imgui_renderer import ModernglImguiRenderer
 
 scale_factor = 1
