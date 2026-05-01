@@ -299,7 +299,6 @@ def main():
     boxernet = BoxerNet.load_from_checkpoint(args.ckpt, device=device)
     loader.resize = boxernet.hw
     # Re-trigger prefetch so the first frame uses the correct resize.
-    loader.index = 0
     loader._init_prefetch()
     print(f"==> Will resize images to {loader.resize}x{loader.resize} for boxernet")
     _dbg("boxernet")
@@ -319,7 +318,7 @@ def main():
     video_dir = os.path.join(log_dir, f"{args.write_name}_viz")
     if args.viz_headless:
         safe_delete_folder(
-            video_dir, extensions=[".png"], keep_folder=True, recursive=True
+            video_dir, extensions=[".jpg", ".png"], keep_folder=True, recursive=True
         )
         os.makedirs(video_dir, exist_ok=True)
         print(
