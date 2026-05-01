@@ -86,6 +86,36 @@ def comma_separated_list(value):
     return value.split(",")
 
 
+def _is_apple_format(input_str):
+    """Detect Apple-style RGB-D folders by structure (cam_K.txt + rgb/)."""
+    candidates = [input_str]
+    if not os.path.isabs(input_str) and not os.path.exists(input_str):
+        candidates.append(os.path.join(SAMPLE_DATA_PATH, input_str))
+    for c in candidates:
+        if (
+            os.path.isdir(c)
+            and os.path.isfile(os.path.join(c, "cam_K.txt"))
+            and os.path.isdir(os.path.join(c, "rgb"))
+        ):
+            return True
+    return False
+
+
+def _is_x300_format(input_str):
+    """Detect x300-style minimal samples by structure (rt.json + image.jpg)."""
+    candidates = [input_str]
+    if not os.path.isabs(input_str) and not os.path.exists(input_str):
+        candidates.append(os.path.join(SAMPLE_DATA_PATH, input_str))
+    for c in candidates:
+        if (
+            os.path.isdir(c)
+            and os.path.isfile(os.path.join(c, "rt.json"))
+            and os.path.isfile(os.path.join(c, "image.jpg"))
+        ):
+            return True
+    return False
+
+
 def main():
     # fmt: off
     parser = argparse.ArgumentParser()
@@ -148,6 +178,18 @@ def main():
     elif args.input.startswith("ca1m"):
         dataset_type = "ca1m"
         seq_name = args.input
+    elif _is_apple_format(args.input):
+        dataset_type = "apple"
+        apple_root = args.input
+        if not os.path.isabs(apple_root) and not os.path.exists(apple_root):
+            apple_root = os.path.join(SAMPLE_DATA_PATH, apple_root)
+        seq_name = os.path.basename(apple_root.rstrip("/"))
+    elif _is_x300_format(args.input):
+        dataset_type = "x300"
+        x300_root = args.input
+        if not os.path.isabs(x300_root) and not os.path.exists(x300_root):
+            x300_root = os.path.join(SAMPLE_DATA_PATH, x300_root)
+        seq_name = os.path.basename(x300_root.rstrip("/"))
     else:
         dataset_type = "aria"
         remote_root = args.input
@@ -232,10 +274,44 @@ def main():
             max_frames=args.max_n,
             resize=(args.detector_hw, args.detector_hw),
         )
+    elif dataset_type == "apple":
+        from loaders.apple_loader import AppleLoader
+
+        loader = AppleLoader(
+            args.input,
+            start_frame=args.start_n,
+            skip_frames=args.skip_n,
+            max_frames=args.max_n,
+        )
+        if args.fuse:
+            print(
+                "==> Warning: --fuse is disabled for AppleLoader (per-frame gravity, no global pose)"
+            )
+            args.fuse = False
+        if args.track:
+            print(
+                "==> Warning: --track is disabled for AppleLoader (per-frame gravity, no global pose)"
+            )
+            args.track = False
+    elif dataset_type == "x300":
+        from loaders.x300_loader import X300Loader
+
+        loader = X300Loader(args.input)
+        if args.fuse:
+            print("==> Warning: --fuse is disabled for X300Loader (single frame)")
+            args.fuse = False
+        if args.track:
+            print("==> Warning: --track is disabled for X300Loader (single frame)")
+            args.track = False
     else:
         from loaders.aria_loader import AriaLoader
 
         print(f"==> Sequence name: '{seq_name}'")
+        # unrotate=True pre-rotates the captured (sideways) Aria image to be
+        # upright and emits rotated0=False — matching the convention used by
+        # ScanNet/CA1M/Apple/X300. BoxerNet is empirically not invariant to
+        # the rotated flag (different predictions for the same content), so
+        # standardizing on a single convention is preferable for generalization.
         loader = AriaLoader(
             remote_root,
             camera=args.camera,
@@ -244,7 +320,7 @@ def main():
             with_obb=args.gt2d,
             pinhole=args.pinhole,
             resize=None,
-            unrotate=False,
+            unrotate=True,
             skip_n=args.skip_n,
             max_n=args.max_n,
             start_n=args.start_n,

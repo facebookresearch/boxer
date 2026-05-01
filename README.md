@@ -29,6 +29,10 @@ uv pip install projectaria-tools
 
 # 3D interactive viewer for view_*.py scripts
 uv pip install moderngl moderngl-window imgui-bundle
+
+# For Apple-format RGB-D data (cam_K.txt + rgb/ + depth/), gravity is
+# estimated per-frame with GeoCalib. Optional install:
+uv pip install 'geocalib @ git+https://github.com/cvg/GeoCalib'
 ```
 
 ## Download Model Checkpoints
