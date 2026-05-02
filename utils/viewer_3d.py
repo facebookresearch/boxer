@@ -2733,16 +2733,18 @@ class OBBViewer(OrbitViewer):
 
         if self.total_frames > 0:
             imgui.push_item_width(300)
+            display_frame_idx = self.current_frame_idx + 1
             changed, new_frame = imgui.slider_int(
-                "Frame",
-                self.current_frame_idx,
-                0,
-                max(0, self.total_frames - 1),
+                "Image Index",
+                display_frame_idx,
+                1,
+                max(1, self.total_frames),
             )
             if changed:
                 self.is_playing = False
-                self._step_to_frame(new_frame)
+                self._step_to_frame(new_frame - 1)
             imgui.pop_item_width()
+            imgui.text(f"Image: {display_frame_idx} / {self.total_frames}")
 
             imgui.push_item_width(200)
             _changed, self.playback_fps = imgui.slider_float(
@@ -6087,22 +6089,27 @@ class TrackerViewer(SequenceOBBViewer):
             self._step_to_frame(0)
 
         imgui.push_item_width(300)
-        changed, new_frame = imgui.slider_int(
-            "Frame",
+        seek_frame_idx = (
             self._seek_target_frame
             if self._seek_dirty_time is not None
-            else self.current_frame_idx,
-            0,
-            max(0, self.total_frames - 1),
+            else self.current_frame_idx
+        )
+        display_seek_idx = seek_frame_idx + 1
+        changed, new_frame = imgui.slider_int(
+            "Image Index",
+            display_seek_idx,
+            1,
+            max(1, self.total_frames),
         )
         if changed:
             self.is_playing = False
             if self.follow_view:
                 self._snap_orbit_from_follow()
                 self.follow_view = False
-            self._seek_target_frame = new_frame
+            self._seek_target_frame = new_frame - 1
             self._seek_dirty_time = time_module.time()
         imgui.pop_item_width()
+        imgui.text(f"Image: {display_seek_idx} / {self.total_frames}")
 
         imgui.push_item_width(200)
         _changed, self.playback_fps = imgui.slider_float(
