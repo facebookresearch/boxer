@@ -164,10 +164,18 @@ def main():
             self._draw_end_screen: tuple[float, float] | None = None
             self._prompt_dirty = False
             self.conf_threshold = 0.6
+            self.rgb_bb2_thickness = 6.0
+            self.rgb_bb2_result_thickness = 4.0
+            self.prompt_3d_line_width = 4.0
             self._flash_text = ""
             self._flash_time = 0.0  # time remaining for flash
             self._flash_color = (0.0, 1.0, 0.0)  # green by default
             self._flash_screen_pos = None  # (x, y) screen coords for flash
+            self._held_frame_key = None
+            self._held_frame_dir = 0
+            self._held_frame_next_time = 0.0
+            self._held_frame_repeat_delay = 0.18
+            self._held_frame_repeat_interval = 1.0 / 30.0
 
             # 3D line geometry for prompted OBBs
             self._prompt_line_vbo = None
@@ -229,6 +237,7 @@ def main():
             # Scale up all ImGui elements
             imgui.get_style().font_scale_main *= 1.4
             self.ui_panel_width = 550
+            self.rgb_obb_thickness = 4.0
 
             # Load SDP after GL context is ready
             self._load_sdp_point_cloud()
@@ -1033,6 +1042,7 @@ def main():
         # ── Rendering ────────────────────────────────────────────────
 
         def render_3d(self, time_val: float, frame_time: float) -> None:
+            self._update_held_frame_key()
             super().render_3d(time_val, frame_time)
 
             # Get 3D viewport dimensions
@@ -1084,7 +1094,9 @@ def main():
             # Render prompted OBB lines
             if self._prompt_line_vao is not None and self._prompt_line_count > 0:
                 self.line_prog["mvp"].write(mvp_bytes)
-                self.line_prog["line_width"].write(np.array(3.0, dtype="f4").tobytes())
+                self.line_prog["line_width"].write(
+                    np.array(self.prompt_3d_line_width, dtype="f4").tobytes()
+                )
                 self.line_prog["prob_threshold"].write(
                     np.array(0.0, dtype="f4").tobytes()
                 )
@@ -1191,7 +1203,9 @@ def main():
                 sx0, sy0 = self._draw_start_screen
                 sx1, sy1 = self._draw_end_screen
                 green = imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 0.8)
-                draw_list.add_rect(sx0, sy0, sx1, sy1, green, thickness=5.0)
+                draw_list.add_rect(
+                    sx0, sy0, sx1, sy1, green, thickness=self.rgb_bb2_thickness
+                )
 
             # Flash confidence text centered on the 2D BB
             if self._flash_time > 0 and self._flash_screen_pos is not None:
@@ -1252,7 +1266,12 @@ def main():
                             color[0], color[1], color[2], 0.9
                         )
                         draw_list.add_rect(
-                            tl[0], tl[1], br[0], br[1], col, thickness=6.0
+                            tl[0],
+                            tl[1],
+                            br[0],
+                            br[1],
+                            col,
+                            thickness=self.rgb_bb2_thickness,
                         )
                         # Score label at top-left of box
                         label = f"{score:.2f}"
@@ -1281,7 +1300,12 @@ def main():
                         else:
                             col = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 0.5)
                         draw_list.add_rect(
-                            tl[0], tl[1], br[0], br[1], col, thickness=3.0
+                            tl[0],
+                            tl[1],
+                            br[0],
+                            br[1],
+                            col,
+                            thickness=self.rgb_bb2_result_thickness,
                         )
                         # 3D conf label
                         tag = "3D" if accepted else "rej"
@@ -1677,6 +1701,48 @@ def main():
             else:
                 self._upload_rgb_texture(rgb)
 
+        def _stop_manual_frame_repeat(self):
+            self._held_frame_key = None
+            self._held_frame_dir = 0
+            self._held_frame_next_time = 0.0
+
+        def _step_manual_frame(self, direction: int) -> None:
+            if self.total_frames == 0:
+                return
+            self.is_playing = False
+            if self.follow_view:
+                self._focus_on_current_frame()
+                self.follow_view = False
+            if direction > 0:
+                self._step_forward()
+            else:
+                self._step_to_frame(self.current_frame_idx - 1)
+
+        def _start_manual_frame_repeat(self, key, direction: int) -> None:
+            self._held_frame_key = key
+            self._held_frame_dir = direction
+            self._held_frame_next_time = time.time() + self._held_frame_repeat_delay
+
+        def _update_held_frame_key(self) -> None:
+            if self._held_frame_key is None or self._held_frame_dir == 0:
+                return
+            now = time.time()
+            if now < self._held_frame_next_time:
+                return
+
+            while now >= self._held_frame_next_time:
+                self._step_manual_frame(self._held_frame_dir)
+                self._held_frame_next_time += self._held_frame_repeat_interval
+                if (
+                    (self.current_frame_idx == 0 and self._held_frame_dir < 0)
+                    or (
+                        self.current_frame_idx >= self.total_frames - 1
+                        and self._held_frame_dir > 0
+                    )
+                ):
+                    self._held_frame_next_time = now + self._held_frame_repeat_interval
+                    break
+
         def on_key_event(self, key, action, modifiers):
             """Override to sync follow_view with play/pause."""
             # When imgui text input is focused, forward key to imgui but
@@ -1688,17 +1754,32 @@ def main():
 
             if key == self.wnd.keys.ESCAPE:
                 if action == self.wnd.keys.ACTION_PRESS:
+                    self._stop_manual_frame_repeat()
                     self.is_playing = False
                     if self.follow_view:
                         self._focus_on_current_frame()
                         self.follow_view = False
                 return
 
+            action_release = getattr(self.wnd.keys, "ACTION_RELEASE", None)
+            if action_release is not None and action == action_release:
+                if key == self._held_frame_key:
+                    self._stop_manual_frame_repeat()
+                super().on_key_event(key, action, modifiers)
+                return
+
+            action_repeat = getattr(self.wnd.keys, "ACTION_REPEAT", None)
+            if action_repeat is not None and action == action_repeat and key in (
+                self.wnd.keys.RIGHT,
+                self.wnd.keys.LEFT,
+            ):
+                return
             if action != self.wnd.keys.ACTION_PRESS:
                 super().on_key_event(key, action, modifiers)
                 return
 
             if key == self.wnd.keys.SPACE:
+                self._stop_manual_frame_repeat()
                 if self.current_frame_idx >= self.total_frames - 1:
                     self._step_to_frame(0)
                     self.is_playing = True
@@ -1714,17 +1795,13 @@ def main():
                     self.follow_view = False
                 self._last_step_time = time.time()
             elif key == self.wnd.keys.RIGHT:
-                self.is_playing = False
-                if self.follow_view:
-                    self._focus_on_current_frame()
-                    self.follow_view = False
-                self._step_forward()
+                if action == self.wnd.keys.ACTION_PRESS:
+                    self._start_manual_frame_repeat(key, 1)
+                self._step_manual_frame(1)
             elif key == self.wnd.keys.LEFT:
-                self.is_playing = False
-                if self.follow_view:
-                    self._focus_on_current_frame()
-                    self.follow_view = False
-                self._step_to_frame(self.current_frame_idx - 1)
+                if action == self.wnd.keys.ACTION_PRESS:
+                    self._start_manual_frame_repeat(key, -1)
+                self._step_manual_frame(-1)
             else:
                 super().on_key_event(key, action, modifiers)
 
