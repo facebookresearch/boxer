@@ -116,6 +116,68 @@ def _is_x300_format(input_str):
     return False
 
 
+def _is_wild_format(input_str):
+    """Detect a bare folder of unposed RGB images (no metadata files).
+
+    Run after the more specific format detectors so it doesn't shadow them.
+    """
+    candidates = [input_str]
+    if not os.path.isabs(input_str) and not os.path.exists(input_str):
+        candidates.append(os.path.join(SAMPLE_DATA_PATH, input_str))
+    exts = (".png", ".jpg", ".jpeg")
+    for c in candidates:
+        if not os.path.isdir(c):
+            continue
+        if any(f.lower().endswith(exts) for f in os.listdir(c)):
+            return True
+    return False
+
+
+def _render_fused_video(fused_csv_path, loader, log_dir, write_name, fps):
+    """Render each loader frame with the fused 3D boxes overlaid, then ffmpeg."""
+    if not os.path.isfile(fused_csv_path):
+        print(f"==> No fused CSV at {fused_csv_path}, skipping --fuse_video")
+        return
+
+    timed_obbs = read_obb_csv(fused_csv_path)
+    if len(timed_obbs) == 0:
+        print(f"==> Fused CSV is empty, skipping --fuse_video")
+        return
+    # Fused OBBs share a single timestamp (0 = static map).
+    fused_obbs = next(iter(timed_obbs.values()))
+    print(f"==> Rendering {len(fused_obbs)} fused boxes onto {len(loader)} frames")
+
+    frame_dir = os.path.join(log_dir, f"{write_name}_fused_frames")
+    safe_delete_folder(frame_dir)
+    os.makedirs(frame_dir, exist_ok=True)
+
+    for i, datum in enumerate(loader):
+        viz = torch2cv2(datum["img0"][0])
+        rotated = bool(datum["rotated0"].item())
+        viz = draw_bb3s(
+            viz=viz,
+            T_world_rig=datum["T_world_rig0"],
+            cam=datum["cam0"],
+            obbs=fused_obbs,
+            already_rotated=rotated,
+            rotate_label=rotated,
+            draw_label=True,
+            thickness=2,
+        )
+        put_text(viz, f"Fused 3D Boxes ({len(fused_obbs)})", scale=0.6, line=0)
+        out_path = os.path.join(frame_dir, f"{write_name}_fused_{i:06d}.jpg")
+        cv2.imwrite(out_path, viz, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+
+    make_mp4(
+        frame_dir,
+        fps,
+        output_dir=log_dir,
+        image_glob=f"{write_name}_fused_*.jpg",
+        output_name=f"{write_name}_fused.mp4",
+    )
+    safe_delete_folder(frame_dir)
+
+
 def main():
     # fmt: off
     parser = argparse.ArgumentParser()
@@ -139,6 +201,10 @@ def main():
     parser.add_argument("--force_cpu", action="store_true", help="force CPU")
     parser.add_argument("--gt2d", action="store_true", help="use GT pseudo 2DBB as input")
     parser.add_argument("--fuse", action="store_true", help="run offline 3D box fusion after processing")
+    parser.add_argument("--fuse_video", action="store_true", help="render a video of fused 3D boxes overlaid on the RGB images (implies --fuse)")
+    parser.add_argument("--fuse_iou", type=float, default=0.3, help="3D IoU threshold for fusion clustering (default: 0.3)")
+    parser.add_argument("--fuse_min_dets", type=int, default=4, help="minimum detections per cluster to keep an instance (default: 4; lower for short sequences)")
+    parser.add_argument("--fuse_conf", type=float, default=0.55, help="per-detection confidence floor before fusion (default: 0.55)")
     parser.add_argument("--track", action="store_true", help="run online 3D box tracking and show tracked boxes in Top Down View")
     parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, "boxernet_hw960in4x6d768-wssxpf9p.ckpt"), help="path to BoxerNet checkpoint")
     parser.add_argument("--force_precision", type=str, default=None, choices=["float32", "bfloat16"], help="Override auto-detected inference precision")
@@ -147,6 +213,8 @@ def main():
 
     if args.fuse and args.track:
         parser.error("--fuse and --track are mutually exclusive")
+    if args.fuse_video:
+        args.fuse = True
     if args.cache3d:
         args.cache2d = True
     args.viz_headless = not args.skip_viz
@@ -190,6 +258,12 @@ def main():
         if not os.path.isabs(x300_root) and not os.path.exists(x300_root):
             x300_root = os.path.join(SAMPLE_DATA_PATH, x300_root)
         seq_name = os.path.basename(x300_root.rstrip("/"))
+    elif _is_wild_format(args.input):
+        dataset_type = "wild"
+        wild_root = args.input
+        if not os.path.isabs(wild_root) and not os.path.exists(wild_root):
+            wild_root = os.path.join(SAMPLE_DATA_PATH, wild_root)
+        seq_name = os.path.basename(wild_root.rstrip("/"))
     else:
         dataset_type = "aria"
         remote_root = args.input
@@ -225,7 +299,12 @@ def main():
             from utils.fuse_3d_boxes import fuse_obbs_from_csv
 
             print(f"\n==> Running fusion on {csv_path}")
-            fuse_obbs_from_csv(csv_path)
+            fuse_obbs_from_csv(
+                csv_path,
+                iou_threshold=args.fuse_iou,
+                min_detections=args.fuse_min_dets,
+                conf_threshold=args.fuse_conf,
+            )
 
         if os.path.exists(csv2d_out_path):
             print(f"==> 2D BB CSV exists: {csv2d_out_path}")
@@ -303,6 +382,15 @@ def main():
         if args.track:
             print("==> Warning: --track is disabled for X300Loader (single frame)")
             args.track = False
+    elif dataset_type == "wild":
+        from loaders.vggt_loader import VggtLoader
+
+        loader = VggtLoader(
+            args.input,
+            start_frame=args.start_n,
+            skip_frames=args.skip_n,
+            max_frames=args.max_n,
+        )
     else:
         from loaders.aria_loader import AriaLoader
 
@@ -855,6 +943,9 @@ def main():
         if dataset_type in ("omni3d", "scannet"):
             # Omni3D/ScanNet: no real nanosecond timestamps, use fixed framerate
             fps = 10
+        elif dataset_type == "wild":
+            # Wild folders have no real timestamps (VggtLoader synthesizes them).
+            fps = 1
         elif len(timestamps_ns) >= 2:
             total_time_ns = timestamps_ns[-1] - timestamps_ns[0]
             if total_time_ns > 0:
@@ -876,7 +967,23 @@ def main():
         from utils.fuse_3d_boxes import fuse_obbs_from_csv
 
         print(f"\n==> Running fusion on {csv_path}")
-        fuse_obbs_from_csv(csv_path)
+        fuse_obbs_from_csv(
+            csv_path,
+            iou_threshold=args.fuse_iou,
+            min_detections=args.fuse_min_dets,
+            conf_threshold=args.fuse_conf,
+        )
+
+        if args.fuse_video:
+            base, ext = os.path.splitext(csv_path)
+            fused_csv_path = f"{base}_fused{ext}"
+            _render_fused_video(
+                fused_csv_path=fused_csv_path,
+                loader=loader,
+                log_dir=log_dir,
+                write_name=args.write_name,
+                fps=1 if dataset_type == "wild" else 10,
+            )
 
     if tracker is not None:
         active_tracks = tracker._get_active_tracks()
