@@ -17,11 +17,16 @@ import threading
 import time
 from typing import Optional
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 import cv2
 import moderngl
 import numpy as np
 import torch
 
+import aria
 import aria.sdk_gen2 as sdk_gen2
 import aria.stream_receiver as receiver
 from projectaria_tools.core.sensor_data import (
@@ -34,12 +39,22 @@ import utils.imgui_compat as imgui
 from boxernet.boxernet import BoxerNet
 from owl.owl_wrapper import OwlWrapper
 from utils.demo_utils import CKPT_PATH
-from utils.image import put_text, render_bb2, torch2cv2
+from utils.image import draw_bb3s, put_text, render_bb2, torch2cv2
 from utils.taxonomy import load_text_labels
 from utils.tw.camera import CameraTW
 from utils.tw.obb import BB3D_LINE_ORDERS, ObbTW
 from utils.tw.pose import PoseTW
 from utils.viewer_3d import OrbitViewer, launch_viewer
+
+
+def ensure_aria_tools_on_path() -> None:
+    aria_dir = os.path.dirname(os.path.abspath(aria.__file__))
+    tools_dir = os.path.join(aria_dir, "tools")
+    if not os.path.exists(os.path.join(tools_dir, "adb")):
+        return
+    path_parts = os.environ.get("PATH", "").split(os.pathsep)
+    if tools_dir not in path_parts:
+        os.environ["PATH"] = tools_dir + os.pathsep + os.environ.get("PATH", "")
 
 
 def jet_colors_bgr(scores):
@@ -149,6 +164,8 @@ def run_inference(
     HW: int,
     detector_hw: int,
     thresh3d: float,
+    bb2_line_width: int,
+    bb3_line_width: int,
     dev: str,
     pdtype,
 ):
@@ -173,16 +190,22 @@ def run_inference(
     )
     labels2d = [text_labels[i] for i in label_ints]
 
-    # Left panel: RGB + 2D overlays
+    # Center panel: RGB with 2D and projected 3D overlays.
     viz_2d = torch2cv2(img_torch, rotate=False, ensure_rgb=True)
     if bb2d.shape[0] > 0:
         bb2_texts = [f"{l[:10]} {s:.2f}" for s, l in zip(scores2d, labels2d)]
         bb2_colors = jet_colors_bgr(scores2d)
         viz_2d = render_bb2(
-            viz_2d, bb2d, rotated=False, texts=bb2_texts, clr=bb2_colors
+            viz_2d,
+            bb2d,
+            scale=float(bb2_line_width),
+            rotated=False,
+            texts=bb2_texts,
+            clr=bb2_colors,
         )
     put_text(viz_2d, f"OWLv2 {detector_hw}x{detector_hw}", scale=0.6, line=0)
     put_text(viz_2d, f"t={ts_ns / 1e9:.3f}s", scale=0.5, line=2)
+    viz_3d = torch2cv2(img_torch, rotate=False, ensure_rgb=True)
 
     obb_pr_w = ObbTW(torch.zeros(0, 165))
     scores3d = torch.zeros(0)
@@ -222,8 +245,32 @@ def run_inference(
         labels3d = [labels2d[i] for i in range(len(labels2d)) if keepers[i]]
         n_3d = len(labels3d)
 
+        if n_3d > 0:
+            bb3_colors = jet_colors_bgr(scores3d.tolist())
+            bb3_texts = [
+                f"{label[:10]} {float(score):.2f}"
+                for label, score in zip(labels3d, scores3d.tolist())
+            ]
+            viz_3d = draw_bb3s(
+                viz_3d,
+                T_wr,
+                cam,
+                obb_pr_w,
+                draw_label=False,
+                draw_score=False,
+                render_obb_corner_steps=6,
+                rotate_label=False,
+                colors=bb3_colors,
+                texts=bb3_texts,
+                text_sz=0.35,
+                thickness=bb3_line_width,
+            )
+
+    put_text(viz_3d, "Projected BoxerNet 3DBBs", scale=0.6, line=0)
+
     return {
         "viz_2d_bgr": viz_2d,
+        "viz_3d_bgr": viz_3d,
         "obb_pr_w": obb_pr_w,
         "scores3d": scores3d,
         "labels3d": labels3d,
@@ -291,7 +338,7 @@ void main() {
 
 class LiveBoxerViewer(OrbitViewer):
     title = "Live BoxerNet"
-    window_size = (1600, 800)
+    window_size = (4000, 2000)
 
     # Injected before mglw.run_window_config(LiveBoxerViewer):
     state: StreamState = None
@@ -308,7 +355,7 @@ class LiveBoxerViewer(OrbitViewer):
 
     # Layout
     ui_panel_width = 320
-    rgb_panel_width = 520
+    rgb_panel_width = 960
     frustum_scale = 0.2
 
     def init_scene(self) -> None:
@@ -356,6 +403,8 @@ class LiveBoxerViewer(OrbitViewer):
         self.thresh3d = float(self.init_thresh3d)
         self.show_obbs_3d = True
         self.show_frustum = True
+        self.bb2_line_width = 2
+        self.bb3_image_line_width = 2
         self.line_width = 3.0
         self.frustum_line_width = 2.0
 
@@ -369,8 +418,24 @@ class LiveBoxerViewer(OrbitViewer):
 
     def _get_3d_viewport_size(self) -> tuple[int, int]:
         w, h = self.wnd.size
-        vw = max(1, w - self.ui_panel_width - self.rgb_panel_width)
+        vw = max(1, int(w - self.ui_panel_width - self.rgb_panel_width))
         return vw, h
+
+    def _clamp_panel_widths(self) -> None:
+        win_w, _ = self.wnd.size
+        min_3d_width = 260
+        self.ui_panel_width = float(np.clip(self.ui_panel_width, 240, 560))
+        self.rgb_panel_width = float(np.clip(self.rgb_panel_width, 320, 1100))
+        max_total = max(560, win_w - min_3d_width)
+        total = self.ui_panel_width + self.rgb_panel_width
+        if total <= max_total:
+            return
+        overflow = total - max_total
+        shrink_rgb = min(overflow, max(0, self.rgb_panel_width - 320))
+        self.rgb_panel_width -= shrink_rgb
+        overflow -= shrink_rgb
+        if overflow > 0:
+            self.ui_panel_width = max(240, self.ui_panel_width - overflow)
 
     def get_camera_matrices(self):
         from utils.viewer_3d import _look_at, _perspective_projection
@@ -412,6 +477,8 @@ class LiveBoxerViewer(OrbitViewer):
             self.HW,
             self.detector_hw,
             float(self.thresh3d),
+            int(round(self.bb2_line_width)),
+            int(round(self.bb3_image_line_width)),
             self.dev,
             self.pdtype,
         )
@@ -422,8 +489,9 @@ class LiveBoxerViewer(OrbitViewer):
         self._n_2d = result["n_2d"]
         self._n_3d = result["n_3d"]
 
-        # Center panel: upload RGB+2D viz
-        rgb = cv2.cvtColor(result["viz_2d_bgr"], cv2.COLOR_BGR2RGB)
+        separator = np.full((6, result["viz_2d_bgr"].shape[1], 3), 24, dtype=np.uint8)
+        viz_bgr = np.vstack([result["viz_2d_bgr"], separator, result["viz_3d_bgr"]])
+        rgb = cv2.cvtColor(viz_bgr, cv2.COLOR_BGR2RGB)
         self._upload_rgb_texture(rgb)
 
         # Right panel: rebuild 3D line geometry
@@ -617,11 +685,12 @@ class LiveBoxerViewer(OrbitViewer):
         self.ctx.scissor = None
 
     def render_ui(self) -> None:
+        self._clamp_panel_widths()
         win_w, win_h = self.wnd.size
 
         # Left: control panel
         imgui.set_next_window_position(0, 0, imgui.ALWAYS)
-        imgui.set_next_window_size(self.ui_panel_width, win_h, imgui.ALWAYS)
+        imgui.set_next_window_size(int(self.ui_panel_width), win_h, imgui.ALWAYS)
         imgui.begin(
             "Live BoxerNet Controls",
             flags=imgui.WINDOW_NO_MOVE
@@ -632,15 +701,44 @@ class LiveBoxerViewer(OrbitViewer):
         imgui.text(f"2D detections: {self._n_2d}")
         imgui.text(f"3D detections: {self._n_3d}")
         imgui.separator()
-        imgui.push_item_width(200)
-        _, self.thresh2d = imgui.slider_float(
+        slider_w = max(160, int(self.ui_panel_width) - 28)
+        imgui.push_item_width(slider_w)
+
+        def labeled_slider_float(label, value, min_value, max_value, fmt="%.3f"):
+            imgui.text(label)
+            changed, value = imgui.slider_float(
+                f"##{label}", value, min_value, max_value, fmt
+            )
+            return changed, value
+
+        def labeled_slider_int(label, value, min_value, max_value):
+            imgui.text(label)
+            changed, value = imgui.slider_int(
+                f"##{label}", value, min_value, max_value
+            )
+            return changed, value
+
+        _, self.ui_panel_width = labeled_slider_float(
+            "UI width", self.ui_panel_width, 240, 560, "%.0f"
+        )
+        _, self.rgb_panel_width = labeled_slider_float(
+            "Image width", self.rgb_panel_width, 320, 1100, "%.0f"
+        )
+        imgui.separator()
+        _, self.thresh2d = labeled_slider_float(
             "2DBB threshold", self.thresh2d, 0.0, 1.0
         )
-        _, self.thresh3d = imgui.slider_float(
+        _, self.thresh3d = labeled_slider_float(
             "3DBB threshold", self.thresh3d, 0.0, 1.0
         )
-        _, self.line_width = imgui.slider_float(
-            "OBB line width", self.line_width, 1.0, 10.0
+        _, self.bb2_line_width = labeled_slider_int(
+            "2DBB line width", self.bb2_line_width, 1, 12
+        )
+        _, self.bb3_image_line_width = labeled_slider_int(
+            "3DBB image line width", self.bb3_image_line_width, 1, 12
+        )
+        _, self.line_width = labeled_slider_float(
+            "3D scene OBB line width", self.line_width, 1.0, 10.0
         )
         imgui.pop_item_width()
         imgui.separator()
@@ -653,8 +751,8 @@ class LiveBoxerViewer(OrbitViewer):
         # Center: RGB + 2DBB overlay panel
         if self._rgb_texture is not None:
             tex_w, tex_h = self._rgb_tex_size
-            imgui.set_next_window_position(self.ui_panel_width, 0, imgui.ALWAYS)
-            imgui.set_next_window_size(self.rgb_panel_width, win_h, imgui.ALWAYS)
+            imgui.set_next_window_position(int(self.ui_panel_width), 0, imgui.ALWAYS)
+            imgui.set_next_window_size(int(self.rgb_panel_width), win_h, imgui.ALWAYS)
             expanded, _ = imgui.begin(
                 "RGB",
                 flags=imgui.WINDOW_NO_MOVE
@@ -686,7 +784,7 @@ def parse_args():
     p.add_argument("--profile_name", type=str, default="profile9")
     p.add_argument("--wifi", action="store_true")
     p.add_argument("--ip", type=str, default=None)
-    p.add_argument("--serial", type=str, default="1M0YDB5HBC0813")
+    p.add_argument("--serial", type=str, default=None)
     p.add_argument("--labels", type=str, default="lvisplus")
     p.add_argument("--thresh2d", type=float, default=0.25)
     p.add_argument("--thresh3d", type=float, default=0.5)
@@ -714,6 +812,7 @@ def pick_device(force_cpu: bool) -> str:
 
 def main():
     args = parse_args()
+    ensure_aria_tools_on_path()
 
     device_client = sdk_gen2.DeviceClient()
     device_client.set_client_config(sdk_gen2.DeviceClientConfig())
