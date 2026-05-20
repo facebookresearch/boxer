@@ -36,3 +36,9 @@ output/
 
 # ImGui
 imgui.ini
+
+# Local Aria state
+.aria_last_ip.txt
+
+# Local TensorRT / ONNX scratch artifacts
+tmp/
