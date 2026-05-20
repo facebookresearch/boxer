@@ -30,6 +30,7 @@ from utils.demo_utils import (
 from utils.file_io import ObbCsvWriter2, load_bb2d_csv, read_obb_csv, save_bb2d_csv
 from utils.image import draw_bb3s, put_text, render_bb2, render_depth_patches, torch2cv2
 from utils.taxonomy import load_text_labels
+from utils.gravity import gravity_align_T_world_cam
 from utils.tw.tensor_utils import (
     pad_string,
     string2tensor,
@@ -54,6 +55,68 @@ def jet_colors_bgr(scores):
     u8 = (vals * 255).astype(np.uint8).reshape(1, -1)
     bgr = cv2.applyColorMap(u8, cv2.COLORMAP_JET)[0]  # (N, 3)
     return [tuple(int(c) for c in row) for row in bgr]
+
+
+def _fmt_tensor(x, precision=4):
+    return np.array2string(
+        x.detach().cpu().float().numpy(), precision=precision, suppress_small=False
+    )
+
+
+def debug_boxer_input(prefix, datum, bb2d):
+    img = datum["img0"]
+    cam = datum["cam0"].float()
+    T_wr = datum["T_world_rig0"].float()
+    rotated = datum["rotated0"]
+    sdp_w = datum["sdp_w"].float()
+    T_wc = T_wr @ cam.T_camera_rig.inverse()
+    T_wv = gravity_align_T_world_cam(T_wc.unsqueeze(0), z_grav=True)
+    print(f"==> {prefix} Boxer input debug", flush=True)
+    print(
+        f"    img0 shape={tuple(img.shape)}, dtype={img.dtype}, "
+        f"range=({float(img.min()):.4f}, {float(img.max()):.4f})",
+        flush=True,
+    )
+    print(f"    rotated0={bool(rotated.item())}", flush=True)
+    print(
+        f"    cam0 size={_fmt_tensor(cam.size)}, f={_fmt_tensor(cam.f)}, "
+        f"c={_fmt_tensor(cam.c)}, valid_radius={_fmt_tensor(cam.valid_radius)}",
+        flush=True,
+    )
+    print(
+        f"    cam0.T_camera_rig t={_fmt_tensor(cam.T_camera_rig.t)}, "
+        f"rpy_deg={_fmt_tensor(cam.T_camera_rig.to_euler(rad=False, silent=True))}",
+        flush=True,
+    )
+    print(
+        f"    T_world_rig0 t={_fmt_tensor(T_wr.t)}, "
+        f"rpy_deg={_fmt_tensor(T_wr.to_euler(rad=False, silent=True))}",
+        flush=True,
+    )
+    print(
+        f"    T_world_cam t={_fmt_tensor(T_wc.t)}, "
+        f"rpy_deg={_fmt_tensor(T_wc.to_euler(rad=False, silent=True))}",
+        flush=True,
+    )
+    print(
+        f"    T_world_voxel rpy_deg={_fmt_tensor(T_wv.to_euler(rad=False, silent=True))}",
+        flush=True,
+    )
+    print(f"    sdp_w shape={tuple(sdp_w.shape)}", flush=True)
+    if sdp_w.numel() > 0:
+        print(
+            f"    sdp_w min={_fmt_tensor(sdp_w.min(dim=0).values)}, "
+            f"max={_fmt_tensor(sdp_w.max(dim=0).values)}",
+            flush=True,
+        )
+    if bb2d.numel() > 0:
+        print(
+            f"    bb2d shape={tuple(bb2d.shape)}, min={_fmt_tensor(bb2d.min(dim=0).values)}, "
+            f"max={_fmt_tensor(bb2d.max(dim=0).values)}",
+            flush=True,
+        )
+    else:
+        print(f"    bb2d shape={tuple(bb2d.shape)}", flush=True)
 
 
 TAB20 = [
@@ -114,6 +177,7 @@ def main():
     parser.add_argument("--ckpt", type=str, default=os.path.join(CKPT_PATH, DEFAULT_BOXERNET_CKPT), help="path to BoxerNet checkpoint")
     parser.add_argument("--force_precision", type=str, default=None, choices=["float32", "bfloat16"], help="Override auto-detected inference precision")
     parser.add_argument("--output_dir", type=str, default=EVAL_PATH, help="Output directory for results (default: output/)")
+    parser.add_argument("--debug_boxer_input", action="store_true", help="Print the first datum handed to BoxerNet")
     args = parser.parse_args()
 
     if args.fuse and args.track:
@@ -376,6 +440,7 @@ def main():
     timer = CudaTimer(device)
     pbar = tqdm(range(len(loader)), desc="BoxerNet")
     DEBUG_VIZ = os.environ.get("DEBUG_VIZ", "0") == "1"
+    debug_boxer_input_printed = False
     _dbg("ready")
 
     for ii in pbar:
@@ -501,6 +566,9 @@ def main():
         cam = datum["cam0"].float()
         T_wr = datum["T_world_rig0"].float()
         datum["bb2d"] = bb2d
+        if args.debug_boxer_input and not debug_boxer_input_printed:
+            debug_boxer_input("run_boxer", datum, bb2d)
+            debug_boxer_input_printed = True
         if args.force_precision is not None:
             precision_dtype = (
                 torch.bfloat16 if args.force_precision == "bfloat16" else torch.float32
