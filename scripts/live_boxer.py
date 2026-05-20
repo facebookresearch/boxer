@@ -10,6 +10,8 @@ Press 'q' or Esc to quit. Right-drag to orbit, left-drag to pan, scroll to zoom.
 """
 
 import argparse
+import colorsys
+import hashlib
 import ipaddress
 import os
 import platform
@@ -44,7 +46,7 @@ from utils.gravity import gravity_align_T_world_cam
 from owl.owl_wrapper import OwlWrapper
 from utils.demo_utils import CKPT_PATH, DEFAULT_BOXERNET_CKPT
 from utils.image import draw_bb3s, put_text, render_bb2, torch2cv2
-from utils.taxonomy import load_text_labels
+from utils.taxonomy import BOXY_SEM2NAME, SSI_COLORS_ALT, TEXT2COLORS, load_text_labels
 from utils.tw.camera import CameraTW
 from utils.tw.obb import BB3D_LINE_ORDERS, ObbTW
 from utils.tw.pose import PoseTW
@@ -234,6 +236,62 @@ def jet_colors_rgb_float(scores):
     bgr = cv2.applyColorMap(u8, cv2.COLORMAP_JET)[0].astype(np.float32) / 255.0
     rgb = bgr[:, ::-1]
     return [tuple(float(c) for c in row) for row in rgb]
+
+
+def _stable_label_color_rgb(label: str) -> tuple[float, float, float]:
+    key = (label or "unknown").strip().lower()
+    if key in TEXT2COLORS:
+        color = TEXT2COLORS[key]
+        return float(color[0]), float(color[1]), float(color[2])
+
+    compact = key.replace(" ", "")
+    for name, color in SSI_COLORS_ALT.items():
+        lowered = name.strip().lower()
+        if lowered == key or lowered.replace(" ", "") == compact:
+            return float(color[0]), float(color[1]), float(color[2])
+
+    digest = hashlib.md5(key.encode("utf-8")).digest()
+    hue = digest[0] / 255.0
+    sat = 0.68 + 0.20 * (digest[1] / 255.0)
+    val = 0.72 + 0.18 * (digest[2] / 255.0)
+    r, g, b = colorsys.hsv_to_rgb(float(hue), float(sat), float(val))
+    return float(r), float(g), float(b)
+
+
+def obb_class_color_rgb(label: str, sem_id: int) -> tuple[float, float, float]:
+    if sem_id in BOXY_SEM2NAME:
+        sem_name = BOXY_SEM2NAME[sem_id]
+        color = SSI_COLORS_ALT.get(sem_name)
+        if color is not None:
+            return float(color[0]), float(color[1]), float(color[2])
+    return _stable_label_color_rgb(label)
+
+
+def get_obb_color_arrays(
+    labels: list[str],
+    sem_ids,
+    scores,
+    use_class_colors: bool,
+) -> tuple[list[tuple[int, int, int]], np.ndarray]:
+    if len(labels) == 0:
+        return [], np.zeros((0, 3), dtype=np.float32)
+
+    if use_class_colors:
+        rgb = np.asarray(
+            [
+                obb_class_color_rgb(label, int(sem_id))
+                for label, sem_id in zip(labels, sem_ids)
+            ],
+            dtype=np.float32,
+        )
+    else:
+        rgb = np.asarray(jet_colors_rgb_float(scores.tolist()), dtype=np.float32)
+
+    bgr = [
+        tuple(int(np.clip(round(ch * 255.0), 0, 255)) for ch in row[::-1])
+        for row in rgb
+    ]
+    return bgr, rgb.astype(np.float32)
 
 
 def get_autocast_dtype_for_cuda():
@@ -843,6 +901,7 @@ def run_inference(
     live_rotation: str,
     enable_owl: bool,
     enable_boxer: bool,
+    bb3_use_class_colors: bool,
 ):
     """Run one OWL+BoxerNet pass on the latest frame.
 
@@ -862,6 +921,8 @@ def run_inference(
         img_torch, cam, live_rotation
     )
     sdp_w = torch.zeros(0, 3)
+    t_start = time.perf_counter()
+    use_cuda_timing = dev == "cuda" and torch.cuda.is_available()
 
     debug_this_frame = debug_geometry and not state.debug_geometry_logged
     if debug_this_frame:
@@ -877,6 +938,8 @@ def run_inference(
             rotation_policy,
         )
 
+    if use_cuda_timing:
+        torch.cuda.synchronize()
     if enable_owl:
         bb2d, scores2d, label_ints, _ = owl.forward(
             img_torch * 255.0,
@@ -887,6 +950,8 @@ def run_inference(
         bb2d = torch.zeros((0, 4), dtype=torch.float32)
         scores2d = torch.zeros((0,), dtype=torch.float32)
         label_ints = []
+    if use_cuda_timing:
+        torch.cuda.synchronize()
     if debug_this_frame:
         if bb2d.shape[0] > 0:
             print(
@@ -921,14 +986,19 @@ def run_inference(
     put_text(viz_2d, f"OWLv2 {detector_hw}x{detector_hw}", scale=0.6, line=0)
     put_text(viz_2d, f"t={ts_ns / 1e9:.3f}s", scale=0.5, line=2)
     viz_3d = viz_rgb.copy()
+    t_owl_done = time.perf_counter()
 
     obb_pr_w = ObbTW(torch.zeros(0, 165))
     scores3d = torch.zeros(0)
     labels3d: list = []
+    bb3_rgb_colors = np.zeros((0, 3), dtype=np.float32)
     n_2d = bb2d.shape[0]
     n_3d = 0
+    t_boxer_done = t_owl_done
 
     if enable_boxer and n_2d > 0:
+        if use_cuda_timing:
+            torch.cuda.synchronize()
         datum = {
             "img0": img_torch,
             "cam0": cam,
@@ -961,7 +1031,11 @@ def run_inference(
         n_3d = len(labels3d)
 
         if n_3d > 0:
-            bb3_colors = jet_colors_bgr(scores3d.tolist())
+            sem_ids3d = obb_pr_w.sem_id.squeeze(-1).cpu().numpy().astype(int).tolist()
+            bb3_colors, bb3_rgb_colors = get_obb_color_arrays(
+                labels3d, sem_ids3d, scores3d, bb3_use_class_colors
+            )
+            obb_pr_w.set_color(torch.from_numpy(bb3_rgb_colors).float())
             bb3_texts = [
                 f"{label[:10]} {float(score):.2f}"
                 for label, score in zip(labels3d, scores3d.tolist())
@@ -981,6 +1055,9 @@ def run_inference(
                 text_sz=0.35,
                 thickness=bb3_line_width,
             )
+        if use_cuda_timing:
+            torch.cuda.synchronize()
+        t_boxer_done = time.perf_counter()
 
     put_text(viz_3d, "Projected BoxerNet 3DBBs", scale=0.6, line=0)
 
@@ -991,6 +1068,10 @@ def run_inference(
         "obb_pr_w": obb_pr_w,
         "scores3d": scores3d,
         "labels3d": labels3d,
+        "bb3_rgb_colors": bb3_rgb_colors,
+        "owl_ms": (t_owl_done - t_start) * 1000.0,
+        "boxer_ms": (t_boxer_done - t_owl_done) * 1000.0,
+        "rgb_infer_ms": (t_boxer_done - t_start) * 1000.0,
         "T_wr": T_wr,
         "cam": cam,
         "n_2d": n_2d,
@@ -1097,7 +1178,7 @@ class LiveBoxerViewer(OrbitViewer):
     follow_smoothing: float = 0.25
 
     # Layout
-    ui_panel_width = 320
+    ui_panel_width = 416
     rgb_panel_width = 960
     frustum_scale = 0.2
 
@@ -1131,6 +1212,11 @@ class LiveBoxerViewer(OrbitViewer):
         self._frame_count = 0
         self._frame_count_t0 = time.time()
         self._fps = 0.0
+        self._owl_ms = 0.0
+        self._boxer_ms = 0.0
+        self._rgb_pipeline_ms = 0.0
+        self._total_frame_ms = 0.0
+        self._fs_points_in_obbs = 0
 
         # GL resources
         self._rgb_texture: Optional[moderngl.Texture] = None
@@ -1195,6 +1281,8 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_overlay_depths: Optional[np.ndarray] = None
         self._fs_overlay_debug_last_print = 0
         self.fs_runtime: Optional[FoundationStereoRuntime] = None
+        self._latest_obbs_3d = ObbTW(torch.zeros(0, 165))
+        self._latest_scores_3d = torch.zeros(0)
 
         # ImGui-controlled state
         self.thresh2d = float(self.owl.min_confidence)
@@ -1215,6 +1303,8 @@ class LiveBoxerViewer(OrbitViewer):
         self.show_fs_trajectory = True
         self.show_fs_frustum = True
         self.fs_use_depth_colormap = True
+        self.fs_color_points_by_obb = True
+        self.bb3_use_class_colors = True
         self.bb2_line_width = 2
         self.bb3_image_line_width = 2
         self.line_width = 3.0
@@ -1274,6 +1364,7 @@ class LiveBoxerViewer(OrbitViewer):
     # -- inference + GPU upload --
 
     def _maybe_run_inference(self) -> None:
+        t_frame_start = time.perf_counter()
         # Cheap snapshot to skip duplicate frames before doing real work
         with self.state.lock:
             frame = self.state.frame
@@ -1303,6 +1394,7 @@ class LiveBoxerViewer(OrbitViewer):
             self.live_rotation,
             self.enable_owl,
             self.enable_boxer and self.enable_owl,
+            self.bb3_use_class_colors,
         )
         if result is None:
             return
@@ -1310,6 +1402,11 @@ class LiveBoxerViewer(OrbitViewer):
         self._last_ts = result["ts_ns"]
         self._n_2d = result["n_2d"]
         self._n_3d = result["n_3d"]
+        self._owl_ms = float(result["owl_ms"])
+        self._boxer_ms = float(result["boxer_ms"])
+        self._rgb_pipeline_ms = float(result["rgb_infer_ms"])
+        self._latest_obbs_3d = self._maybe_convert_obbs_world(result["obb_pr_w"])
+        self._latest_scores_3d = result["scores3d"]
 
         separator = np.full((6, result["viz_2d_bgr"].shape[1], 3), 24, dtype=np.uint8)
         viz_fs_bgr = self._render_fs_overlay_image(
@@ -1328,15 +1425,8 @@ class LiveBoxerViewer(OrbitViewer):
         self._upload_rgb_texture(rgb)
 
         # Right panel: rebuild 3D line geometry
-        self._rebuild_obb_lines(result["obb_pr_w"], result["scores3d"])
+        self._rebuild_obb_lines(self._latest_obbs_3d, result["scores3d"])
         self._rebuild_frustum(result["cam"], result["T_wr"])
-
-        # Lock orbit center on first frame
-        if not self._target_inited:
-            t = result["T_wr"].t.reshape(3).cpu().float().numpy().astype("f4")
-            self.camera_target = t
-            self._rebuild_world_axes(self.camera_target)
-            self._target_inited = True
 
         # FPS counter
         self._frame_count += 1
@@ -1345,6 +1435,7 @@ class LiveBoxerViewer(OrbitViewer):
             self._fps = self._frame_count / (now - self._frame_count_t0)
             self._frame_count = 0
             self._frame_count_t0 = now
+        self._total_frame_ms = (time.perf_counter() - t_frame_start) * 1000.0
 
     def _upload_rgb_texture(self, img_rgb: np.ndarray) -> None:
         h, w = img_rgb.shape[:2]
@@ -1492,8 +1583,18 @@ class LiveBoxerViewer(OrbitViewer):
         s = corners[batch_idx, s_idx]
         e = corners[batch_idx, e_idx]
 
-        rgb = jet_colors_rgb_float(scores.tolist())
-        col = torch.tensor(rgb, dtype=torch.float32) if N > 0 else torch.zeros(0, 3)
+        obb_colors = obbs.color.float().cpu()
+        if obb_colors.ndim == 1:
+            obb_colors = obb_colors.unsqueeze(0)
+        if obb_colors.shape[0] == N and torch.all(obb_colors >= 0):
+            col = obb_colors
+        else:
+            rgb = jet_colors_rgb_float(scores.tolist())
+            col = (
+                torch.tensor(rgb, dtype=torch.float32)
+                if N > 0
+                else torch.zeros(0, 3)
+            )
         col = col[:, None, :].expand(N, 12, 3)
         prob = scores.float()[:, None, None].expand(N, 12, 1)
 
@@ -1639,6 +1740,51 @@ class LiveBoxerViewer(OrbitViewer):
         bgr = cv2.applyColorMap(u8, cv2.COLORMAP_JET)[0].astype(np.float32) / 255.0
         return bgr[:, ::-1].astype("f4")
 
+    def _color_fs_points_from_obbs(
+        self, pts_world: np.ndarray, base_colors: np.ndarray
+    ) -> np.ndarray:
+        if (
+            not self.fs_color_points_by_obb
+            or self._latest_obbs_3d is None
+            or len(self._latest_obbs_3d) == 0
+            or len(pts_world) == 0
+        ):
+            self._fs_points_in_obbs = 0
+            return base_colors
+
+        obbs = self._latest_obbs_3d.clone()
+        expand_m = 0.03
+        bb3_object = obbs.bb3_object.clone()
+        bb3_object[:, 0] -= expand_m
+        bb3_object[:, 1] += expand_m
+        bb3_object[:, 2] -= expand_m
+        bb3_object[:, 3] += expand_m
+        bb3_object[:, 4] -= expand_m
+        bb3_object[:, 5] += expand_m
+        obbs.set_bb3_object(bb3_object)
+
+        obb_colors = obbs.color.cpu().numpy().astype(np.float32)
+        if obb_colors.ndim == 1:
+            obb_colors = obb_colors.reshape(1, 3)
+        if obb_colors.shape[0] != len(obbs) or np.any(obb_colors < 0):
+            self._fs_points_in_obbs = 0
+            return base_colors
+
+        out = base_colors.copy()
+        pts_world_t = torch.from_numpy(pts_world.astype(np.float32))
+        scores_np = self._latest_scores_3d.cpu().numpy().astype(np.float32)
+        order = np.argsort(scores_np)
+        covered = np.zeros((len(pts_world),), dtype=bool)
+        for idx in order:
+            mask = (
+                obbs[idx].points_inside_bb3(pts_world_t).cpu().numpy().astype(bool)
+            )
+            if np.any(mask):
+                out[mask] = obb_colors[idx]
+                covered |= mask
+        self._fs_points_in_obbs = int(covered.sum())
+        return out
+
     def _maybe_print_fs_debug_stats(
         self,
         baseline: float,
@@ -1705,6 +1851,14 @@ class LiveBoxerViewer(OrbitViewer):
         if not self.vio_world_is_y_up:
             return T_world_device
         return self._zup_from_yup_matrix() @ T_world_device
+
+    def _maybe_convert_obbs_world(self, obbs: ObbTW) -> ObbTW:
+        if not self.vio_world_is_y_up or obbs is None or len(obbs) == 0:
+            return obbs
+        T_fix = PoseTW.from_matrix(
+            torch.from_numpy(self._zup_from_yup_matrix()).float()
+        )
+        return obbs.transform(T_fix)
 
     def _load_foundation_stereo(self) -> None:
         foundation_path = (
@@ -1848,6 +2002,14 @@ class LiveBoxerViewer(OrbitViewer):
             (1.0 - blend) * float(self.camera_elevation) + blend * elevation
         )
 
+    def _seed_free_orbit_from_follow_view(self, T_world_rect: np.ndarray) -> None:
+        prev_blend = float(self.follow_smoothing)
+        self.follow_smoothing = 0.0
+        try:
+            self._apply_follow_view(T_world_rect)
+        finally:
+            self.follow_smoothing = prev_blend
+
     def _maybe_print_fs_debug_stats(
         self,
         baseline: float,
@@ -1990,6 +2152,9 @@ class LiveBoxerViewer(OrbitViewer):
             colors = self._depth_jet_colors(z[valid], near=0.1, far=5.0)
         else:
             colors = np.stack([intens, intens, intens], axis=1).astype("f4")
+        colors = self._color_fs_points_from_obbs(
+            pts_world.astype(np.float32), colors.astype(np.float32)
+        )
         data = np.concatenate([pts_world, colors], axis=1).astype("f4")
         data_bytes = data.tobytes()
         if self.fs_point_vbo is None or self.fs_point_vbo.size < len(data_bytes):
@@ -2015,8 +2180,10 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_median_depth = float(np.nanmedian(z_valid))
         self._fs_last_T_world_rect = T_world_rect
         if not self._fs_target_inited:
-            self.camera_target = np.nanmedian(pts_world, axis=0).astype("f4")
+            self._seed_free_orbit_from_follow_view(T_world_rect)
+            self._rebuild_world_axes(self.camera_target)
             self._fs_target_inited = True
+            self._target_inited = True
         self._update_fs_geometry(pair_ts, T_world_rect, linear, depth, left_rect)
 
     # -- render --
@@ -2163,6 +2330,10 @@ class LiveBoxerViewer(OrbitViewer):
             | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS,
         )
         imgui.text(f"FPS: {self._fps:.1f}")
+        imgui.text(f"RGB pipeline: {self._rgb_pipeline_ms:.1f} ms")
+        imgui.text(f"OWL: {self._owl_ms:.1f} ms")
+        imgui.text(f"Boxer: {self._boxer_ms:.1f} ms")
+        imgui.text(f"Total frame: {self._total_frame_ms:.1f} ms")
         imgui.text(f"2D detections: {self._n_2d}")
         imgui.text(f"3D detections: {self._n_3d}")
         imgui.separator()
@@ -2221,6 +2392,9 @@ class LiveBoxerViewer(OrbitViewer):
         self.enable_boxer = boxer_enabled and self.enable_owl
         if not self.enable_owl:
             imgui.text("Boxer requires OWL proposals")
+        _, self.bb3_use_class_colors = imgui.checkbox(
+            "3DBB class/prompt colors", self.bb3_use_class_colors
+        )
         if self.fs_state is not None:
             _, self.enable_foundation_stereo = imgui.checkbox(
                 "Enable FoundationStereo", self.enable_foundation_stereo
@@ -2239,6 +2413,7 @@ class LiveBoxerViewer(OrbitViewer):
             imgui.text(
                 f"FS points: {self.fs_point_count}  infer: {self._fs_infer_ms:.1f} ms"
             )
+            imgui.text(f"FS points in 3DBBs: {self._fs_points_in_obbs}")
             imgui.text(
                 f"FS FPS: {self._fs_processed / max(time.time() - self._fs_t0, 1e-6):.2f}  median: {self._fs_median_depth:.3f} m"
             )
@@ -2254,6 +2429,9 @@ class LiveBoxerViewer(OrbitViewer):
             )
             _, self.fs_use_depth_colormap = imgui.checkbox(
                 "FS jet depth colors", self.fs_use_depth_colormap
+            )
+            _, self.fs_color_points_by_obb = imgui.checkbox(
+                "FS color by containing 3DBB", self.fs_color_points_by_obb
             )
             _, self.show_fs_frustum = imgui.checkbox(
                 "Show fs frustum", self.show_fs_frustum
@@ -2283,8 +2461,6 @@ class LiveBoxerViewer(OrbitViewer):
             _, self.follow_smoothing = labeled_slider_float(
                 "Follow smoothing", self.follow_smoothing, 0.0, 1.0
             )
-        if imgui.button("Recenter on device"):
-            self._target_inited = False
         imgui.end()
 
         # Center: RGB + 2DBB overlay panel
