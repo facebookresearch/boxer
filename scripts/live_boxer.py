@@ -30,6 +30,7 @@ import cv2
 import moderngl
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 import aria
 import aria.sdk_gen2 as sdk_gen2
@@ -45,7 +46,7 @@ from boxernet.boxernet import BoxerNet
 from utils.gravity import gravity_align_T_world_cam
 from owl.owl_wrapper import OwlWrapper
 from utils.demo_utils import CKPT_PATH, DEFAULT_BOXERNET_CKPT
-from utils.image import draw_bb3s, put_text, render_bb2, torch2cv2
+from utils.image import draw_bb3s, put_text, render_bb2, render_depth_patches, torch2cv2
 from utils.taxonomy import BOXY_SEM2NAME, SSI_COLORS_ALT, TEXT2COLORS, load_text_labels
 from utils.tw.camera import CameraTW
 from utils.tw.obb import BB3D_LINE_ORDERS, ObbTW
@@ -311,6 +312,7 @@ class StreamState:
         self.rgb_image_size: Optional[tuple[int, int]] = None
         self.rgb_intrinsics: Optional[list[float]] = None
         self.debug_geometry_logged = False
+        self.rectify_debug_logged = False
 
     def snapshot(self):
         with self.lock:
@@ -365,12 +367,21 @@ def tensorrt_dtype_to_torch(dtype):
 
 
 class FoundationStereoRuntime:
-    def __init__(self, model_path: str, valid_iters: int):
+    def __init__(
+        self,
+        model_path: str,
+        valid_iters: int,
+        consistency: bool = False,
+        consistency_threshold: float = 1.0,
+    ):
         self.model_path = model_path
         self.valid_iters = int(valid_iters)
+        self.consistency = bool(consistency)
+        self.consistency_threshold = float(consistency_threshold)
         self.kind = "torch"
         self.cfg = None
         self.model = None
+        self.supports_consistency_batch2 = True
 
         fs_repo = "/home/demo/code/projectaria_gen2_depth_from_stereo"
         foundation_path = os.path.join(fs_repo, "FoundationStereo")
@@ -394,6 +405,13 @@ class FoundationStereoRuntime:
                 raise RuntimeError(
                     f"Failed to create TensorRT execution context: {model_path}"
                 )
+            self.trt_context_aux = self.trt_engine.create_execution_context()
+            if self.trt_context_aux is None:
+                raise RuntimeError(
+                    f"Failed to create auxiliary TensorRT execution context: {model_path}"
+                )
+            self.trt_overlap_stream0 = torch.cuda.Stream()
+            self.trt_overlap_stream1 = torch.cuda.Stream()
             self.trt_input_names = []
             self.trt_output_names = []
             for i in range(self.trt_engine.num_io_tensors):
@@ -407,6 +425,16 @@ class FoundationStereoRuntime:
                     "Unexpected TensorRT FoundationStereo IO signature: "
                     f"{self.trt_input_names=} {self.trt_output_names=}"
                 )
+            self.supports_consistency_batch2 = True
+            for name in self.trt_input_names:
+                try:
+                    _, _, max_shape = self.trt_engine.get_tensor_profile_shape(name, 0)
+                    if not max_shape or max_shape[0] < 2:
+                        self.supports_consistency_batch2 = False
+                except Exception:
+                    engine_shape = tuple(self.trt_engine.get_tensor_shape(name))
+                    if not engine_shape or engine_shape[0] < 2:
+                        self.supports_consistency_batch2 = False
             self.kind = "tensorrt"
             self.model = self.trt_engine
             print(f"==> FoundationStereo TensorRT engine loaded: {model_path}", flush=True)
@@ -448,49 +476,141 @@ class FoundationStereoRuntime:
             flush=True,
         )
 
-    def infer(self, left_rect: np.ndarray, right_rect: np.ndarray) -> np.ndarray:
+    def _prepare_rectified_inputs(
+        self, left_rect_batch: np.ndarray, right_rect_batch: np.ndarray
+    ):
         from core.utils.utils import InputPadder
 
-        left_rgb = np.repeat(left_rect[..., None], 3, axis=2)
-        right_rgb = np.repeat(right_rect[..., None], 3, axis=2)
+        if left_rect_batch.ndim != 3 or right_rect_batch.ndim != 3:
+            raise ValueError(
+                "Expected FoundationStereo batch inputs shaped [B, H, W], "
+                f"got {left_rect_batch.shape=} {right_rect_batch.shape=}"
+            )
+        left_rgb = np.repeat(left_rect_batch[..., None], 3, axis=3)
+        right_rgb = np.repeat(right_rect_batch[..., None], 3, axis=3)
         left_t = (
-            torch.from_numpy(left_rgb).float().cuda().permute(2, 0, 1).unsqueeze(0)
+            torch.from_numpy(left_rgb).float().cuda().permute(0, 3, 1, 2).contiguous()
         )
         right_t = (
-            torch.from_numpy(right_rgb).float().cuda().permute(2, 0, 1).unsqueeze(0)
+            torch.from_numpy(right_rgb)
+            .float()
+            .cuda()
+            .permute(0, 3, 1, 2)
+            .contiguous()
         )
         padder = InputPadder(left_t.shape, divis_by=32, force_square=False)
         left_p, right_p = padder.pad(left_t, right_t)
+        return left_p.contiguous(), right_p.contiguous(), padder
+
+    def _run_trt_context(self, context, left_p: torch.Tensor, right_p: torch.Tensor, stream):
+        inputs = [left_p, right_p]
+        for name, tensor in zip(self.trt_input_names, inputs):
+            context.set_input_shape(name, tuple(tensor.shape))
+            context.set_tensor_address(name, tensor.data_ptr())
+
+        outputs = {}
+        for name in self.trt_output_names:
+            shape = tuple(context.get_tensor_shape(name))
+            dtype = tensorrt_dtype_to_torch(self.trt_engine.get_tensor_dtype(name))
+            outputs[name] = torch.empty(shape, dtype=dtype, device="cuda")
+            context.set_tensor_address(name, outputs[name].data_ptr())
+
+        if stream is None:
+            stream_ptr = torch.cuda.current_stream().cuda_stream
+        else:
+            stream.wait_stream(torch.cuda.current_stream())
+            stream_ptr = stream.cuda_stream
+        ok = context.execute_async_v3(stream_ptr)
+        if not ok:
+            raise RuntimeError("TensorRT FoundationStereo inference failed")
+        return outputs[self.trt_output_names[0]].float()
+
+    def _infer_batch(
+        self, left_rect_batch: np.ndarray, right_rect_batch: np.ndarray
+    ) -> np.ndarray:
+        left_p, right_p, padder = self._prepare_rectified_inputs(
+            left_rect_batch, right_rect_batch
+        )
 
         if self.kind == "tensorrt":
-            inputs = [
-                left_p.contiguous(),
-                right_p.contiguous(),
-            ]
-            for name, tensor in zip(self.trt_input_names, inputs):
-                self.trt_context.set_input_shape(name, tuple(tensor.shape))
-                self.trt_context.set_tensor_address(name, tensor.data_ptr())
-
-            outputs = {}
-            for name in self.trt_output_names:
-                shape = tuple(self.trt_context.get_tensor_shape(name))
-                dtype = tensorrt_dtype_to_torch(self.trt_engine.get_tensor_dtype(name))
-                outputs[name] = torch.empty(shape, dtype=dtype, device="cuda")
-                self.trt_context.set_tensor_address(name, outputs[name].data_ptr())
-
-            stream = torch.cuda.current_stream().cuda_stream
-            ok = self.trt_context.execute_async_v3(stream)
-            if not ok:
-                raise RuntimeError("TensorRT FoundationStereo inference failed")
-            disp_t = outputs[self.trt_output_names[0]].float()
-            return padder.unpad(disp_t).cpu().numpy().squeeze()
+            disp_t = self._run_trt_context(self.trt_context, left_p, right_p, stream=None)
+            return padder.unpad(disp_t).cpu().numpy()
 
         autocast_dtype = get_autocast_dtype_for_cuda()
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=autocast_dtype):
             disp = self.model.forward(
                 left_p, right_p, iters=self.cfg.valid_iters, test_mode=True
             )
-        return padder.unpad(disp.float()).cpu().numpy().squeeze()
+        return padder.unpad(disp.float()).cpu().numpy()
+
+    def _infer_one_pass(self, left_rect: np.ndarray, right_rect: np.ndarray) -> np.ndarray:
+        disp = self._infer_batch(
+            left_rect[None, ...],
+            right_rect[None, ...],
+        )
+        return np.asarray(disp[0]).squeeze()
+
+    def _infer_two_passes_overlap_trt(
+        self,
+        left_rect: np.ndarray,
+        right_rect: np.ndarray,
+        right_flipped: np.ndarray,
+        left_flipped: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        left0_p, right0_p, padder0 = self._prepare_rectified_inputs(
+            left_rect[None, ...], right_rect[None, ...]
+        )
+        left1_p, right1_p, padder1 = self._prepare_rectified_inputs(
+            right_flipped[None, ...], left_flipped[None, ...]
+        )
+        disp0_t = self._run_trt_context(
+            self.trt_context, left0_p, right0_p, self.trt_overlap_stream0
+        )
+        disp1_t = self._run_trt_context(
+            self.trt_context_aux, left1_p, right1_p, self.trt_overlap_stream1
+        )
+        self.trt_overlap_stream0.synchronize()
+        self.trt_overlap_stream1.synchronize()
+        disp_lr = np.asarray(padder0.unpad(disp0_t).cpu().numpy()[0]).squeeze()
+        disp_rl = np.asarray(padder1.unpad(disp1_t).cpu().numpy()[0]).squeeze()
+        return disp_lr, disp_rl
+
+    def infer(self, left_rect: np.ndarray, right_rect: np.ndarray) -> np.ndarray:
+        if not self.consistency:
+            return self._infer_one_pass(left_rect, right_rect)
+
+        right_flipped = np.ascontiguousarray(right_rect[:, ::-1])
+        left_flipped = np.ascontiguousarray(left_rect[:, ::-1])
+        if self.supports_consistency_batch2:
+            disp_pair = self._infer_batch(
+                np.stack([left_rect, right_flipped], axis=0),
+                np.stack([right_rect, left_flipped], axis=0),
+            )
+            disp_lr = np.asarray(disp_pair[0]).squeeze()
+            disp_rl = np.asarray(disp_pair[1]).squeeze()
+        elif self.kind == "tensorrt":
+            disp_lr, disp_rl = self._infer_two_passes_overlap_trt(
+                left_rect, right_rect, right_flipped, left_flipped
+            )
+        else:
+            disp_lr = self._infer_one_pass(left_rect, right_rect)
+            disp_rl = self._infer_one_pass(right_flipped, left_flipped)
+        disp_rl = np.ascontiguousarray(disp_rl[:, ::-1])
+
+        h, w = disp_lr.shape
+        x_coords = np.arange(w, dtype=np.float32)[None, :].repeat(h, axis=0)
+        x_in_right_f = x_coords - disp_lr
+        out_of_bounds = (x_in_right_f < 0) | (x_in_right_f > w - 1)
+        x_in_right = np.clip(x_in_right_f, 0, w - 1).astype(np.int32)
+        rows = np.arange(h)[:, None].repeat(w, axis=1)
+        disp_rl_at_match = disp_rl[rows, x_in_right]
+        consistent = (
+            np.abs(disp_lr - disp_rl_at_match) < self.consistency_threshold
+        ) & ~out_of_bounds
+
+        disp_out = disp_lr.astype(np.float32, copy=True)
+        disp_out[~consistent] = np.nan
+        return disp_out
 
 
 def make_live_fs_callbacks(state: LiveFsState):
@@ -618,7 +738,10 @@ def run_live_foundation_fs_loop(args, fs_state: LiveFsState):
     fs_runtime = None
     if not args.fs_dry_run:
         fs_runtime = FoundationStereoRuntime(
-            args.fs_ckpt, args.fs_valid_iters
+            args.fs_ckpt,
+            args.fs_valid_iters,
+            consistency=args.consistency,
+            consistency_threshold=args.consistency_threshold,
         )
 
     def make_linear_calib(source_calib):
@@ -764,6 +887,23 @@ def build_cam(intrinsics, T_camera_rig, calib_image_size, image_size, target_hw)
     return cam.scale_to_size((target_hw, target_hw))
 
 
+def build_fisheye_cam_at_image_size(
+    intrinsics, T_camera_rig, calib_image_size, image_size
+):
+    calib_w, calib_h = calib_image_size
+    image_w, image_h = image_size
+    valid_radius = float(np.sqrt(calib_w * calib_w + calib_h * calib_h) / 2.0)
+    cam = CameraTW.from_surreal(
+        width=calib_w,
+        height=calib_h,
+        type_str="Fisheye624",
+        params=torch.tensor(intrinsics, dtype=torch.float32),
+        T_camera_rig=T_camera_rig,
+        valid_radius=torch.tensor([valid_radius], dtype=torch.float32),
+    ).float()
+    return cam.scale_to_size((image_w, image_h))
+
+
 def apply_live_rotation(
     img_torch: torch.Tensor, cam: CameraTW, mode: str
 ) -> tuple[torch.Tensor, CameraTW, torch.Tensor, str]:
@@ -809,6 +949,95 @@ def apply_live_rotation(
             "forced cam.rotate_90_ccw only; image stays in live display orientation",
         )
     raise ValueError(f"Unknown live rotation mode: {mode}")
+
+
+def rectify_rgb_for_owl(
+    img_torch: torch.Tensor,
+    fisheye_cam: CameraTW,
+    target_hw: int,
+    pinhole_fxy: float | None = None,
+) -> tuple[torch.Tensor, CameraTW]:
+    W_src = int(round(float(fisheye_cam.size[0].item())))
+    H_src = int(round(float(fisheye_cam.size[1].item())))
+    W = int(target_hw)
+    H = int(target_hw)
+    if pinhole_fxy is None:
+        pinhole_fxy = float(fisheye_cam.f[0].item()) * 1.2
+    w_ratio = float(W) / float(W_src)
+    h_ratio = float(H) / float(H_src)
+    fx = float(pinhole_fxy) * w_ratio
+    fy = float(pinhole_fxy) * h_ratio
+    cx = float(fisheye_cam.c[0].item()) * w_ratio
+    cy = float(fisheye_cam.c[1].item()) * h_ratio
+    pinhole_cam = CameraTW.from_surreal(
+        width=W,
+        height=H,
+        type_str="pinhole",
+        params=torch.tensor([fx, fy, cx, cy], dtype=torch.float32),
+        T_camera_rig=fisheye_cam.T_camera_rig,
+    ).float()
+    device = img_torch.device
+    xx, yy = torch.meshgrid(
+        torch.arange(W, device=device),
+        torch.arange(H, device=device),
+        indexing="ij",
+    )
+    target = torch.stack([xx, yy], dim=-1).view(-1, 2).float()[None]
+    rays, _ = pinhole_cam.unproject(target)
+    source, _ = fisheye_cam.project(rays)
+    source = source[0]
+    source[..., 0] = (source[..., 0] / max(W_src - 1, 1)) * 2.0 - 1.0
+    source[..., 1] = (source[..., 1] / max(H_src - 1, 1)) * 2.0 - 1.0
+    source = source.view(1, W, H, 2).permute(0, 2, 1, 3).float()
+    rectified = F.grid_sample(
+        img_torch,
+        source,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=True,
+    )
+    return rectified, pinhole_cam
+
+
+def map_bb2_xxyy_between_cams(
+    bb2_xxyy: torch.Tensor,
+    source_cam: CameraTW,
+    target_cam: CameraTW,
+) -> torch.Tensor:
+    if bb2_xxyy.numel() == 0:
+        return bb2_xxyy.clone()
+
+    tl = bb2_xxyy[:, [0, 2]]
+    bl = bb2_xxyy[:, [0, 3]]
+    br = bb2_xxyy[:, [1, 3]]
+    tr = bb2_xxyy[:, [1, 2]]
+    corners = torch.stack([tl, bl, br, tr], dim=1).float()
+    rays, valid_src = source_cam.unproject(corners)
+    proj, valid_tgt = target_cam.project(rays)
+    valid = valid_src & valid_tgt
+
+    x = proj[..., 0]
+    y = proj[..., 1]
+    width = float(target_cam.size.reshape(-1, 2)[0, 0].item())
+    height = float(target_cam.size.reshape(-1, 2)[0, 1].item())
+    x = torch.clamp(x, min=0.0, max=width - 1.0)
+    y = torch.clamp(y, min=0.0, max=height - 1.0)
+
+    invalid_fill_xmin = torch.full_like(x, width - 1.0)
+    invalid_fill_xmax = torch.zeros_like(x)
+    invalid_fill_ymin = torch.full_like(y, height - 1.0)
+    invalid_fill_ymax = torch.zeros_like(y)
+
+    xmin = torch.min(torch.where(valid, x, invalid_fill_xmin), dim=1).values
+    xmax = torch.max(torch.where(valid, x, invalid_fill_xmax), dim=1).values
+    ymin = torch.min(torch.where(valid, y, invalid_fill_ymin), dim=1).values
+    ymax = torch.max(torch.where(valid, y, invalid_fill_ymax), dim=1).values
+
+    out = torch.stack([xmin, xmax, ymin, ymax], dim=-1)
+    any_valid = valid.any(dim=1)
+    non_empty = (xmax > xmin) & (ymax > ymin)
+    keep = any_valid & non_empty
+    return out[keep]
 
 
 def _fmt_tensor(x, precision=4):
@@ -902,6 +1131,8 @@ def run_inference(
     enable_owl: bool,
     enable_boxer: bool,
     bb3_use_class_colors: bool,
+    boxer_sdp_w: torch.Tensor,
+    rectify_rgb_for_owl_boxes: bool,
 ):
     """Run one OWL+BoxerNet pass on the latest frame.
 
@@ -920,7 +1151,53 @@ def run_inference(
     img_torch, cam, rotated0, rotation_policy = apply_live_rotation(
         img_torch, cam, live_rotation
     )
-    sdp_w = torch.zeros(0, 3)
+    owl_img_torch = img_torch
+    owl_cam = cam
+    owl_rotated0 = rotated0
+    if rectify_rgb_for_owl_boxes:
+        owl_src_torch = (
+            torch.from_numpy(arr_rgb).permute(2, 0, 1)[None].float() / 255.0
+        )
+        owl_fisheye_cam = build_fisheye_cam_at_image_size(
+            intr, T_cr, csize, (image_w, image_h)
+        )
+        owl_img_torch, owl_cam = rectify_rgb_for_owl(
+            owl_src_torch, owl_fisheye_cam, HW
+        )
+        owl_img_torch, owl_cam, owl_rotated0, _ = apply_live_rotation(
+            owl_img_torch, owl_cam, live_rotation
+        )
+        if not state.rectify_debug_logged:
+            diff = float((owl_img_torch - img_torch).abs().mean().item())
+            print(
+                f"==> rectify_debug live diff_mean={diff:.6f} "
+                f"orig={tuple(owl_src_torch.shape)} rect={tuple(owl_img_torch.shape)}",
+                flush=True,
+            )
+            try:
+                debug_dir = os.path.join(REPO_ROOT, "tmp", "rectify_debug")
+                os.makedirs(debug_dir, exist_ok=True)
+                cv2.imwrite(
+                    os.path.join(debug_dir, "orig_rgb.png"),
+                    cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR),
+                )
+                cv2.imwrite(
+                    os.path.join(debug_dir, "owl_rectified.png"),
+                    torch2cv2(
+                        owl_img_torch,
+                        rotate=bool(owl_rotated0.item()),
+                        ensure_rgb=True,
+                    ),
+                )
+                print(
+                    f"==> rectify_debug wrote {debug_dir}/orig_rgb.png and owl_rectified.png",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(f"==> rectify_debug write failed: {exc}", flush=True)
+            with state.lock:
+                state.rectify_debug_logged = True
+    sdp_w = boxer_sdp_w if boxer_sdp_w is not None else torch.zeros(0, 3)
     t_start = time.perf_counter()
     use_cuda_timing = dev == "cuda" and torch.cuda.is_available()
 
@@ -942,14 +1219,39 @@ def run_inference(
         torch.cuda.synchronize()
     if enable_owl:
         bb2d, scores2d, label_ints, _ = owl.forward(
-            img_torch * 255.0,
-            rotated=bool(rotated0.item()),
+            owl_img_torch * 255.0,
+            rotated=bool(owl_rotated0.item()),
             resize_to_HW=(detector_hw, detector_hw),
         )
+        bb2d_display = bb2d.clone()
+        scores2d_display = scores2d.clone()
+        label_ints_display = list(label_ints)
+        if rectify_rgb_for_owl_boxes and bb2d.shape[0] > 0:
+            mapped_boxes = []
+            mapped_scores = []
+            mapped_labels = []
+            for i in range(bb2d.shape[0]):
+                mapped = map_bb2_xxyy_between_cams(bb2d[i : i + 1], owl_cam, cam)
+                if mapped.shape[0] == 0:
+                    continue
+                mapped_boxes.append(mapped[0])
+                mapped_scores.append(scores2d[i])
+                mapped_labels.append(label_ints[i])
+            if mapped_boxes:
+                bb2d = torch.stack(mapped_boxes, dim=0)
+                scores2d = torch.stack(mapped_scores, dim=0)
+                label_ints = mapped_labels
+            else:
+                bb2d = torch.zeros((0, 4), dtype=torch.float32)
+                scores2d = torch.zeros((0,), dtype=torch.float32)
+                label_ints = []
     else:
         bb2d = torch.zeros((0, 4), dtype=torch.float32)
         scores2d = torch.zeros((0,), dtype=torch.float32)
         label_ints = []
+        bb2d_display = bb2d
+        scores2d_display = scores2d
+        label_ints_display = []
     if use_cuda_timing:
         torch.cuda.synchronize()
     if debug_this_frame:
@@ -967,23 +1269,33 @@ def run_inference(
         with state.lock:
             state.debug_geometry_logged = True
     labels2d = [text_labels[i] for i in label_ints]
+    labels2d_display = [text_labels[i] for i in label_ints_display]
     rotated_bool = bool(rotated0.item())
 
     # Center panel: RGB with 2D and projected 3D overlays.
     viz_rgb = torch2cv2(img_torch, rotate=rotated_bool, ensure_rgb=True)
-    viz_2d = viz_rgb.copy()
-    if bb2d.shape[0] > 0:
-        bb2_texts = [f"{l[:10]} {s:.2f}" for s, l in zip(scores2d, labels2d)]
-        bb2_colors = jet_colors_bgr(scores2d)
+    viz_2d = torch2cv2(
+        owl_img_torch, rotate=bool(owl_rotated0.item()), ensure_rgb=True
+    )
+    if bb2d_display.shape[0] > 0:
+        bb2_texts = [
+            f"{l[:10]} {s:.2f}" for s, l in zip(scores2d_display, labels2d_display)
+        ]
+        bb2_colors = jet_colors_bgr(scores2d_display)
         viz_2d = render_bb2(
             viz_2d,
-            bb2d,
+            bb2d_display,
             scale=float(bb2_line_width),
-            rotated=rotated_bool,
+            rotated=bool(owl_rotated0.item()),
             texts=bb2_texts,
             clr=bb2_colors,
         )
-    put_text(viz_2d, f"OWLv2 {detector_hw}x{detector_hw}", scale=0.6, line=0)
+    owl_title = (
+        f"OWLv2 rectified pinhole {detector_hw}x{detector_hw}"
+        if rectify_rgb_for_owl_boxes
+        else f"OWLv2 {detector_hw}x{detector_hw}"
+    )
+    put_text(viz_2d, owl_title, scale=0.6, line=0)
     put_text(viz_2d, f"t={ts_ns / 1e9:.3f}s", scale=0.5, line=2)
     viz_3d = viz_rgb.copy()
     t_owl_done = time.perf_counter()
@@ -992,6 +1304,9 @@ def run_inference(
     scores3d = torch.zeros(0)
     labels3d: list = []
     bb3_rgb_colors = np.zeros((0, 3), dtype=np.float32)
+    sdp_patch = None
+    sdp_patch_valid = 0
+    sdp_patch_median = float("nan")
     n_2d = bb2d.shape[0]
     n_3d = 0
     t_boxer_done = t_owl_done
@@ -1013,6 +1328,14 @@ def run_inference(
             with torch.autocast(device_type=dev, dtype=pdtype):
                 out = boxernet.forward(datum)
         obb_pr_w = out["obbs_pr_w"].cpu()[0]
+        if "sdp_patch0" in out:
+            sdp_patch = out["sdp_patch0"].detach()
+            sdp_valid = sdp_patch > 0.0
+            sdp_patch_valid = int(sdp_valid.sum().item())
+            if sdp_patch_valid > 0:
+                sdp_patch_median = float(torch.median(sdp_patch[sdp_valid]).item())
+        else:
+            sdp_patch = None
 
         sem_ids = torch.zeros(len(labels2d), dtype=torch.int32)
         for i, lab in enumerate(labels2d):
@@ -1069,11 +1392,15 @@ def run_inference(
         "scores3d": scores3d,
         "labels3d": labels3d,
         "bb3_rgb_colors": bb3_rgb_colors,
+        "sdp_patch0": sdp_patch.cpu() if sdp_patch is not None else None,
+        "sdp_patch_valid": sdp_patch_valid,
+        "sdp_patch_median": sdp_patch_median,
         "owl_ms": (t_owl_done - t_start) * 1000.0,
         "boxer_ms": (t_boxer_done - t_owl_done) * 1000.0,
         "rgb_infer_ms": (t_boxer_done - t_start) * 1000.0,
         "T_wr": T_wr,
         "cam": cam,
+        "rotated0": rotated0,
         "n_2d": n_2d,
         "n_3d": n_3d,
         "ts_ns": ts_ns,
@@ -1136,7 +1463,7 @@ void main() {
 
 class LiveBoxerViewer(OrbitViewer):
     title = "Live BoxerNet"
-    window_size = (4000, 2000)
+    window_size = (3200, 1800)
 
     # Injected before mglw.run_window_config(LiveBoxerViewer):
     state: StreamState = None
@@ -1156,12 +1483,13 @@ class LiveBoxerViewer(OrbitViewer):
     fs_ckpt: str = ""
     fs_hw: int = 256
     fs_valid_iters: int = 16
+    consistency: bool = False
+    consistency_threshold: float = 1.0
     fs_point_stride: int = 2
     fs_max_depth: float = 5.0
     vio_world_is_y_up: bool = False
     show_fs_points: bool = True
     show_fs_trajectory: bool = True
-    show_fs_frustum: bool = True
     fs_use_depth_colormap: bool = True
     fs_point_size: float = 2.0
     fs_point_alpha: float = 0.85
@@ -1170,17 +1498,29 @@ class LiveBoxerViewer(OrbitViewer):
     enable_owl: bool = True
     enable_boxer: bool = True
     enable_foundation_stereo: bool = True
+    rectify_rgb_for_owl_boxes: bool = False
+    max_steps: int = 0
     fs_debug_stats: bool = True
     follow_mode: bool = False
     follow_back: float = 3.0
     follow_up: float = 3.0
     follow_lookahead: float = 0.20
     follow_smoothing: float = 0.25
+    show_obbs_3d: bool = True
+    show_frustum: bool = True
+    show_world_axes: bool = True
+    show_rgb_fs_points: bool = False
+    show_rgb_fs: bool = False
+    show_rgb_owl: bool = True
+    show_rgb_boxer: bool = False
+    fs_color_points_by_obb: bool = True
+    use_fs_for_boxer_sdp: bool = True
+    fs_boxer_max_points: int = 12000
 
     # Layout
     ui_panel_width = 416
     rgb_panel_width = 960
-    frustum_scale = 0.2
+    frustum_scale = 0.12
 
     def init_scene(self) -> None:
         # Line shader (instanced quads)
@@ -1211,12 +1551,14 @@ class LiveBoxerViewer(OrbitViewer):
         self._n_3d = 0
         self._frame_count = 0
         self._frame_count_t0 = time.time()
+        self._render_steps = 0
         self._fps = 0.0
         self._owl_ms = 0.0
         self._boxer_ms = 0.0
-        self._rgb_pipeline_ms = 0.0
         self._total_frame_ms = 0.0
         self._fs_points_in_obbs = 0
+        self._boxer_sdp_patch_valid = 0
+        self._boxer_sdp_patch_median = float("nan")
 
         # GL resources
         self._rgb_texture: Optional[moderngl.Texture] = None
@@ -1261,9 +1603,6 @@ class LiveBoxerViewer(OrbitViewer):
         self.fs_trail_vbo: Optional[moderngl.Buffer] = None
         self.fs_trail_vao: Optional[moderngl.VertexArray] = None
         self.fs_trail_count = 0
-        self.fs_frustum_vbo: Optional[moderngl.Buffer] = None
-        self.fs_frustum_vao: Optional[moderngl.VertexArray] = None
-        self.fs_frustum_count = 0
         self._fs_last_pair_ts = -1
         self._fs_processed = 0
         self._fs_infer_ms = 0.0
@@ -1275,10 +1614,14 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_t0 = time.time()
         self._fs_target_inited = False
         self._fs_pose_tail: list[tuple[int, np.ndarray]] = []
+        self._last_T_world_rgb_cam: Optional[np.ndarray] = None
+        self._fs_last_T_world_device: Optional[np.ndarray] = None
         self._fs_last_T_world_rect: Optional[np.ndarray] = None
         self._fs_debug_last_print = 0
         self._fs_overlay_pts_world: Optional[np.ndarray] = None
         self._fs_overlay_depths: Optional[np.ndarray] = None
+        self._fs_boxer_pts_world: Optional[np.ndarray] = None
+        self._fs_boxer_pair_ts: int = -1
         self._fs_overlay_debug_last_print = 0
         self.fs_runtime: Optional[FoundationStereoRuntime] = None
         self._latest_obbs_3d = ObbTW(torch.zeros(0, 165))
@@ -1287,28 +1630,34 @@ class LiveBoxerViewer(OrbitViewer):
         # ImGui-controlled state
         self.thresh2d = float(self.owl.min_confidence)
         self.thresh3d = float(self.init_thresh3d)
-        self.show_obbs_3d = True
-        self.show_frustum = True
-        self.show_world_axes = True
-        self.enable_owl = True
-        self.enable_boxer = True
-        self.enable_foundation_stereo = True
-        self.fs_debug_stats = True
-        self.follow_mode = False
-        self.follow_back = 3.0
-        self.follow_up = 3.0
-        self.follow_lookahead = 0.20
-        self.follow_smoothing = 0.25
-        self.show_fs_points = True
-        self.show_fs_trajectory = True
-        self.show_fs_frustum = True
-        self.fs_use_depth_colormap = True
-        self.fs_color_points_by_obb = True
+        self.show_obbs_3d = bool(type(self).show_obbs_3d)
+        self.show_frustum = bool(type(self).show_frustum)
+        self.show_world_axes = bool(type(self).show_world_axes)
+        self.enable_owl = bool(type(self).enable_owl)
+        self.enable_boxer = bool(type(self).enable_boxer)
+        self.enable_foundation_stereo = bool(type(self).enable_foundation_stereo)
+        self.rectify_rgb_for_owl_boxes = bool(type(self).rectify_rgb_for_owl_boxes)
+        self.fs_debug_stats = bool(type(self).fs_debug_stats)
+        self.follow_mode = bool(type(self).follow_mode)
+        self.follow_back = float(type(self).follow_back)
+        self.follow_up = float(type(self).follow_up)
+        self.follow_lookahead = float(type(self).follow_lookahead)
+        self.follow_smoothing = float(type(self).follow_smoothing)
+        self.show_fs_points = bool(type(self).show_fs_points)
+        self.show_fs_trajectory = bool(type(self).show_fs_trajectory)
+        self.show_rgb_fs_points = bool(type(self).show_rgb_fs_points)
+        self.show_rgb_fs = bool(type(self).show_rgb_fs)
+        self.show_rgb_owl = bool(type(self).show_rgb_owl)
+        self.show_rgb_boxer = bool(type(self).show_rgb_boxer)
+        self.fs_use_depth_colormap = bool(type(self).fs_use_depth_colormap)
+        self.fs_color_points_by_obb = bool(type(self).fs_color_points_by_obb)
+        self.use_fs_for_boxer_sdp = bool(type(self).use_fs_for_boxer_sdp)
+        self.fs_boxer_max_points = int(type(self).fs_boxer_max_points)
         self.bb3_use_class_colors = True
         self.bb2_line_width = 2
         self.bb3_image_line_width = 2
         self.line_width = 3.0
-        self.frustum_line_width = 2.0
+        self.frustum_line_width = 3.0
         self.axis_line_width = 5.0
         self.axis_length = 0.5
 
@@ -1333,7 +1682,7 @@ class LiveBoxerViewer(OrbitViewer):
         win_w, _ = self.wnd.size
         min_3d_width = 260
         self.ui_panel_width = float(np.clip(self.ui_panel_width, 240, 560))
-        self.rgb_panel_width = float(np.clip(self.rgb_panel_width, 320, 1100))
+        self.rgb_panel_width = float(np.clip(self.rgb_panel_width, 320, 1500))
         max_total = max(560, win_w - min_3d_width)
         total = self.ui_panel_width + self.rgb_panel_width
         if total <= max_total:
@@ -1376,6 +1725,7 @@ class LiveBoxerViewer(OrbitViewer):
         # Update OWL threshold from the slider before running
         self.owl.min_confidence = float(self.thresh2d)
 
+        boxer_sdp_w = self._get_boxer_sdp_w()
         result = run_inference(
             self.state,
             self.owl,
@@ -1395,6 +1745,8 @@ class LiveBoxerViewer(OrbitViewer):
             self.enable_owl,
             self.enable_boxer and self.enable_owl,
             self.bb3_use_class_colors,
+            boxer_sdp_w,
+            self.rectify_rgb_for_owl_boxes,
         )
         if result is None:
             return
@@ -1404,23 +1756,50 @@ class LiveBoxerViewer(OrbitViewer):
         self._n_3d = result["n_3d"]
         self._owl_ms = float(result["owl_ms"])
         self._boxer_ms = float(result["boxer_ms"])
-        self._rgb_pipeline_ms = float(result["rgb_infer_ms"])
+        self._boxer_sdp_patch_valid = int(result["sdp_patch_valid"])
+        self._boxer_sdp_patch_median = float(result["sdp_patch_median"])
         self._latest_obbs_3d = self._maybe_convert_obbs_world(result["obb_pr_w"])
         self._latest_scores_3d = result["scores3d"]
+        T_world_rgb_cam = result["T_wr"] @ result["cam"].T_camera_rig.inverse()
+        self._last_T_world_rgb_cam = (
+            T_world_rgb_cam.matrix.detach().cpu().numpy().astype(np.float32)
+        )
 
-        separator = np.full((6, result["viz_2d_bgr"].shape[1], 3), 24, dtype=np.uint8)
-        viz_fs_bgr = self._render_fs_overlay_image(
-            result["viz_rgb_bgr"], result["cam"], result["T_wr"]
-        )
-        viz_bgr = np.vstack(
-            [
-                viz_fs_bgr,
-                separator,
-                result["viz_2d_bgr"],
-                separator,
-                result["viz_3d_bgr"],
-            ]
-        )
+        panels = []
+        if self.show_rgb_fs_points:
+            panels.append(
+                self._render_fs_points_overlay_image(
+                    result["viz_rgb_bgr"],
+                    self._fs_overlay_pts_world,
+                    result["cam"],
+                    result["T_wr"],
+                )
+            )
+        if self.show_rgb_fs:
+            panels.append(
+                self._render_sdp_patch_overlay_image(
+                    result["viz_rgb_bgr"],
+                    result["sdp_patch0"],
+                    bool(result["rotated0"].item()),
+                )
+            )
+        if self.show_rgb_owl:
+            panels.append(result["viz_2d_bgr"])
+        if self.show_rgb_boxer:
+            panels.append(result["viz_3d_bgr"])
+        if not panels:
+            panels.append(result["viz_rgb_bgr"])
+
+        if len(panels) == 1:
+            viz_bgr = panels[0]
+        else:
+            separator = np.full((6, panels[0].shape[1], 3), 24, dtype=np.uint8)
+            stacked = []
+            for idx, panel in enumerate(panels):
+                if idx > 0:
+                    stacked.append(separator)
+                stacked.append(panel)
+            viz_bgr = np.vstack(stacked)
         rgb = cv2.cvtColor(viz_bgr, cv2.COLOR_BGR2RGB)
         self._upload_rgb_texture(rgb)
 
@@ -1488,78 +1867,91 @@ class LiveBoxerViewer(OrbitViewer):
         setattr(self, vao_name, vao)
         setattr(self, count_name, len(data))
 
-    def _render_fs_overlay_image(
-        self, base_bgr: np.ndarray, cam: CameraTW, T_wr: PoseTW
+    def _render_sdp_patch_overlay_image(
+        self,
+        base_bgr: np.ndarray,
+        sdp_patch0: Optional[torch.Tensor],
+        rotated0: bool,
     ) -> np.ndarray:
         overlay = base_bgr.copy()
-        if (
-            not self.enable_foundation_stereo
-            or self._fs_overlay_pts_world is None
-            or self._fs_overlay_depths is None
-            or len(self._fs_overlay_pts_world) == 0
-        ):
-            put_text(overlay, "FoundationStereo overlay unavailable", scale=0.6, line=0)
+        if sdp_patch0 is None:
+            put_text(overlay, "Boxer SDP patch overlay unavailable", scale=0.6, line=0)
             return overlay
 
-        pts_world = torch.from_numpy(self._fs_overlay_pts_world).float()
-        T_world_cam = T_wr @ cam.T_camera_rig.inverse()
-        pts_cam = T_world_cam.inverse().transform(pts_world)
+        HH, WW = overlay.shape[:2]
+        viz_sdp, sdp_resized = render_depth_patches(
+            sdp_patch0[0].cpu(),
+            rotated=rotated0,
+            HH=HH,
+            WW=WW,
+        )
+        viz_sdp = np.ascontiguousarray(viz_sdp)
+        mask = sdp_resized > 0.1
+        if np.any(mask):
+            mask3 = mask[:, :, None]
+            overlay = np.where(
+                mask3,
+                (
+                    (viz_sdp.astype(np.uint16) * 51 + overlay.astype(np.uint16) * 205)
+                    >> 8
+                ).astype(np.uint8),
+                overlay,
+            )
+        put_text(overlay, "Boxer SDP patches", scale=0.6, line=0)
+        return overlay
+
+    def _render_fs_points_overlay_image(
+        self,
+        base_bgr: np.ndarray,
+        pts_world: Optional[np.ndarray],
+        cam: CameraTW,
+        T_wr: PoseTW,
+    ) -> np.ndarray:
+        overlay = base_bgr.copy()
+        if pts_world is None or len(pts_world) == 0:
+            put_text(overlay, "FoundationStereo RGB points unavailable", scale=0.6, line=0)
+            return overlay
+
+        pts_world = np.asarray(pts_world, dtype=np.float32)
+        max_points = 40000
+        if len(pts_world) > max_points:
+            step = int(np.ceil(len(pts_world) / max_points))
+            pts_world = pts_world[::step]
+
+        pts_world_t = torch.from_numpy(pts_world).to(device=T_wr.device, dtype=torch.float32)
+        T_wc = T_wr @ cam.T_camera_rig.inverse()
+        pts_cam = T_wc.inverse().transform(pts_world_t)
         pts_2d, valid = cam.project(pts_cam.unsqueeze(0))
-        pts_2d = pts_2d.squeeze(0).cpu().numpy()
-        valid = valid.squeeze(0).cpu().numpy()
+        pts_2d = pts_2d.squeeze(0).detach().cpu().numpy()
+        valid = valid.squeeze(0).detach().cpu().numpy().astype(bool)
+        z = pts_cam[..., 2].detach().cpu().numpy()
+        valid &= np.isfinite(z) & (z > 0.0)
         if not np.any(valid):
-            put_text(overlay, "FoundationStereo overlay: no visible points", scale=0.6, line=0)
+            put_text(overlay, "FoundationStereo RGB points unavailable", scale=0.6, line=0)
             return overlay
 
         pts_2d = np.round(pts_2d[valid]).astype(np.int32)
-        h, w = overlay.shape[:2]
+        z = z[valid]
+        hh, ww = overlay.shape[:2]
         in_bounds = (
             (pts_2d[:, 0] >= 0)
-            & (pts_2d[:, 0] < w)
+            & (pts_2d[:, 0] < ww)
             & (pts_2d[:, 1] >= 0)
-            & (pts_2d[:, 1] < h)
+            & (pts_2d[:, 1] < hh)
         )
         if not np.any(in_bounds):
-            put_text(overlay, "FoundationStereo overlay: points out of view", scale=0.6, line=0)
+            put_text(overlay, "FoundationStereo RGB points unavailable", scale=0.6, line=0)
             return overlay
 
         pts_2d = pts_2d[in_bounds]
-        depths = self._fs_overlay_depths[valid][in_bounds]
-        if (
-            self.fs_debug_stats
-            and self._fs_processed > 0
-            and (
-                self._fs_processed == 1
-                or self._fs_processed - self._fs_overlay_debug_last_print >= 60
-            )
-        ):
-            self._fs_overlay_debug_last_print = self._fs_processed
-            xy_min = pts_2d.min(axis=0)
-            xy_max = pts_2d.max(axis=0)
-            print(
-                "==> fs_overlay "
-                f"projected_valid={int(valid.sum())}/{len(valid)} "
-                f"in_bounds={len(pts_2d)} "
-                f"xy_min=[{xy_min[0]},{xy_min[1]}] "
-                f"xy_max=[{xy_max[0]},{xy_max[1]}]",
-                flush=True,
-            )
-        bgr = cv2.applyColorMap(
-            (np.clip((depths - 0.1) / (5.0 - 0.1), 0.0, 1.0) * 255).astype(np.uint8),
-            cv2.COLORMAP_JET,
-        )
-        overlay_pts = overlay.copy()
-        for (x, y), color in zip(pts_2d, bgr.reshape(-1, 3)):
-            cv2.circle(
-                overlay_pts,
-                (int(x), int(y)),
-                1,
-                tuple(int(c) for c in color.tolist()),
-                thickness=-1,
-                lineType=cv2.LINE_AA,
-            )
-        overlay = cv2.addWeighted(overlay, 0.40, overlay_pts, 0.60, 0.0)
-        put_text(overlay, "FoundationStereo RGB overlay", scale=0.6, line=0)
+        z = z[in_bounds]
+        z_norm = np.clip((z - 0.1) / (5.0 - 0.1), 0.0, 1.0)
+        colors = cv2.applyColorMap(
+            np.round(z_norm * 255.0).astype(np.uint8), cv2.COLORMAP_JET
+        )[:, 0, :]
+        for (x, y), color in zip(pts_2d, colors):
+            cv2.circle(overlay, (int(x), int(y)), 1, tuple(int(c) for c in color.tolist()), -1)
+        put_text(overlay, "FoundationStereo RGB points", scale=0.6, line=0)
         return overlay
 
     def _rebuild_obb_lines(self, obbs: ObbTW, scores: torch.Tensor) -> None:
@@ -1646,7 +2038,7 @@ class LiveBoxerViewer(OrbitViewer):
         )
         R_wc = T_wc.R.reshape(3, 3).cpu().float()
         pts_world = (R_wc @ pts_cam.T).T + origin
-        color = torch.tensor([0.0, 0.8, 0.8], dtype=torch.float32)
+        color = torch.tensor([1.0, 0.85, 0.1], dtype=torch.float32)
         segs = []
         for i in range(4):
             segs.append(torch.cat([origin, pts_world[i], color, torch.ones(1)]))
@@ -1785,6 +2177,22 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_points_in_obbs = int(covered.sum())
         return out
 
+    def _get_boxer_sdp_w(self) -> torch.Tensor:
+        if (
+            not self.use_fs_for_boxer_sdp
+            or not self.enable_foundation_stereo
+            or self._fs_boxer_pts_world is None
+            or len(self._fs_boxer_pts_world) == 0
+        ):
+            return torch.zeros(0, 3, dtype=torch.float32)
+
+        pts = self._fs_boxer_pts_world
+        max_points = max(1, int(self.fs_boxer_max_points))
+        if len(pts) > max_points:
+            step = int(np.ceil(len(pts) / float(max_points)))
+            pts = pts[::step]
+        return torch.from_numpy(np.ascontiguousarray(pts.astype(np.float32)))
+
     def _maybe_print_fs_debug_stats(
         self,
         baseline: float,
@@ -1867,7 +2275,10 @@ class LiveBoxerViewer(OrbitViewer):
         if foundation_path not in sys.path:
             sys.path.insert(0, foundation_path)
         self.fs_runtime = FoundationStereoRuntime(
-            self.fs_ckpt, self.fs_valid_iters
+            self.fs_ckpt,
+            self.fs_valid_iters,
+            consistency=self.consistency,
+            consistency_threshold=self.consistency_threshold,
         )
 
     def _make_fs_linear_calib(self, source_calib):
@@ -1928,46 +2339,22 @@ class LiveBoxerViewer(OrbitViewer):
         else:
             self.fs_trail_count = 0
 
-        w, h = linear.get_image_size()
-        fx, fy, cx, cy = [float(v) for v in linear.get_projection_params()[:4]]
-        z = float(self.fs_frustum_scale)
-        corners_cam = np.array(
-            [
-                [0.0, 0.0, 0.0],
-                [(0.0 - cx) * z / fx, (0.0 - cy) * z / fy, z],
-                [(w - cx) * z / fx, (0.0 - cy) * z / fy, z],
-                [(w - cx) * z / fx, (h - cy) * z / fy, z],
-                [(0.0 - cx) * z / fx, (h - cy) * z / fy, z],
-            ],
-            dtype=np.float32,
-        )
-        corners_world = (
-            T_world_rect[:3, :3] @ corners_cam.T + T_world_rect[:3, 3:4]
-        ).T
-        color = np.array([1.0, 0.85, 0.1], dtype=np.float32)
-        edge_indices = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (2, 3), (3, 4), (4, 1)]
-        lines = []
-        for i0, i1 in edge_indices:
-            lines.append(
-                np.concatenate(
-                    [
-                        corners_world[i0].astype(np.float32),
-                        corners_world[i1].astype(np.float32),
-                        color,
-                        [1.0],
-                    ]
-                )
-            )
-        if self.show_fs_frustum:
-            self._upload_line_data("fs_frustum", np.asarray(lines, dtype=np.float32))
-        else:
-            self.fs_frustum_count = 0
+        _ = linear
 
-    def _apply_follow_view(self, T_world_rect: np.ndarray) -> None:
+    def _apply_follow_view(
+        self,
+        T_world_rect: np.ndarray,
+        T_world_device: Optional[np.ndarray] = None,
+    ) -> None:
         origin_world = np.asarray(T_world_rect[:3, 3], dtype=np.float32)
-        R_world_rect = np.asarray(T_world_rect[:3, :3], dtype=np.float32)
-        forward_world = R_world_rect @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        up_world = R_world_rect @ np.array([0.0, -1.0, 0.0], dtype=np.float32)
+        if T_world_device is None:
+            T_world_device = T_world_rect
+        R_world_device = np.asarray(T_world_device[:3, :3], dtype=np.float32)
+        forward_world = R_world_device @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        forward_norm = float(np.linalg.norm(forward_world))
+        if forward_norm > 1e-6:
+            forward_world = forward_world / forward_norm
+        up_world = np.array([0.0, 0.0, 1.0], dtype=np.float32)
 
         camera_world = (
             origin_world
@@ -2002,11 +2389,15 @@ class LiveBoxerViewer(OrbitViewer):
             (1.0 - blend) * float(self.camera_elevation) + blend * elevation
         )
 
-    def _seed_free_orbit_from_follow_view(self, T_world_rect: np.ndarray) -> None:
+    def _seed_free_orbit_from_follow_view(
+        self,
+        T_world_rect: np.ndarray,
+        T_world_device: Optional[np.ndarray] = None,
+    ) -> None:
         prev_blend = float(self.follow_smoothing)
         self.follow_smoothing = 0.0
         try:
-            self._apply_follow_view(T_world_rect)
+            self._apply_follow_view(T_world_rect, T_world_device)
         finally:
             self.follow_smoothing = prev_blend
 
@@ -2050,7 +2441,6 @@ class LiveBoxerViewer(OrbitViewer):
         if not self.enable_foundation_stereo:
             self.fs_point_count = 0
             self.fs_trail_count = 0
-            self.fs_frustum_count = 0
             self._fs_overlay_pts_world = None
             self._fs_overlay_depths = None
             self._fs_min_depth = float("nan")
@@ -2081,7 +2471,8 @@ class LiveBoxerViewer(OrbitViewer):
         if self._fs_pair_delta_ms > 2.0:
             return
 
-        T_world_device = self._maybe_convert_vio_world(T_world_device)
+        T_world_device_raw = np.asarray(T_world_device, dtype=np.float32).copy()
+        T_world_device = self._maybe_convert_vio_world(T_world_device_raw.copy())
         T_left_device = left_calib.get_transform_device_camera().inverse()
         T_right_device = right_calib.get_transform_device_camera().inverse()
         T_left_right = T_left_device @ T_right_device.inverse()
@@ -2132,21 +2523,19 @@ class LiveBoxerViewer(OrbitViewer):
         y_cam = (ys[valid].astype(np.float32) - cy) * z[valid] / fy
         z_cam = z[valid].astype(np.float32)
         pts_rect = np.stack([x_cam, y_cam, z_cam], axis=1).astype(np.float32)
-        self._maybe_print_fs_debug_stats(
-            baseline=baseline,
-            source_focal=source_focal,
-            rectified_focal=focal,
-            disparity=disparity,
-            depth=depth,
-            z_valid=z[valid].astype(np.float32),
-            pts_rect=pts_rect,
-        )
         R_left_rect_mat = np.asarray(R_left_rect.to_matrix(), dtype=np.float32)
         T_world_rect = T_world_device @ T_device_left
         T_world_rect[:3, :3] = T_world_rect[:3, :3] @ R_left_rect_mat
         pts_world = (T_world_rect[:3, :3] @ pts_rect.T + T_world_rect[:3, 3:4]).T
-        self._fs_overlay_pts_world = pts_world.astype(np.float32)
+        T_world_rect_raw = T_world_device_raw @ T_device_left
+        T_world_rect_raw[:3, :3] = T_world_rect_raw[:3, :3] @ R_left_rect_mat
+        pts_world_raw = (
+            T_world_rect_raw[:3, :3] @ pts_rect.T + T_world_rect_raw[:3, 3:4]
+        ).T.astype(np.float32)
+        self._fs_overlay_pts_world = pts_world_raw
         self._fs_overlay_depths = z[valid].astype(np.float32)
+        self._fs_boxer_pts_world = pts_world_raw
+        self._fs_boxer_pair_ts = pair_ts
         intens = left_rect[0:h:stride, 0:w:stride][valid].astype(np.float32) / 255.0
         if self.fs_use_depth_colormap:
             colors = self._depth_jet_colors(z[valid], near=0.1, far=5.0)
@@ -2178,9 +2567,10 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_max_depth = float(np.nanmax(z_valid))
         self._fs_mean_depth = float(np.nanmean(z_valid))
         self._fs_median_depth = float(np.nanmedian(z_valid))
+        self._fs_last_T_world_device = T_world_device
         self._fs_last_T_world_rect = T_world_rect
         if not self._fs_target_inited:
-            self._seed_free_orbit_from_follow_view(T_world_rect)
+            self._seed_free_orbit_from_follow_view(T_world_rect, T_world_device)
             self._rebuild_world_axes(self.camera_target)
             self._fs_target_inited = True
             self._target_inited = True
@@ -2189,6 +2579,10 @@ class LiveBoxerViewer(OrbitViewer):
     # -- render --
 
     def on_render(self, time_val: float, frame_time: float):
+        self._render_steps += 1
+        if self.max_steps > 0 and self._render_steps > int(self.max_steps):
+            self.wnd.close()
+            return
         self._maybe_update_fs_scene()
         self._maybe_run_inference()
         super().on_render(time_val, frame_time)
@@ -2204,7 +2598,9 @@ class LiveBoxerViewer(OrbitViewer):
         self.ctx.clear(*bg)
 
         if self.follow_mode and self._fs_last_T_world_rect is not None:
-            self._apply_follow_view(self._fs_last_T_world_rect)
+            self._apply_follow_view(
+                self._fs_last_T_world_rect, self._fs_last_T_world_device
+            )
 
         _, _, mvp = self.get_camera_matrices()
         mvp_bytes = np.array(mvp, dtype="f4").tobytes()
@@ -2296,22 +2692,6 @@ class LiveBoxerViewer(OrbitViewer):
                 mode=self.ctx.TRIANGLES, instances=self.fs_trail_count
             )
 
-        if (
-            self.show_fs_frustum
-            and self.fs_frustum_vao is not None
-            and self.fs_frustum_count > 0
-        ):
-            self.ctx.line_width = float(self.fs_line_width)
-            self.line_prog["mvp"].write(mvp_bytes)
-            self.line_prog["prob_threshold"].write(
-                np.array(0.0, dtype="f4").tobytes()
-            )
-            self.line_prog["alpha"].write(np.array(1.0, dtype="f4").tobytes())
-            self.line_prog["viewport_size"].write(viewport.tobytes())
-            self.fs_frustum_vao.render(
-                mode=self.ctx.TRIANGLES, instances=self.fs_frustum_count
-            )
-
         # Restore full viewport for ImGui
         self.ctx.viewport = (0, 0, full_w, full_h)
         self.ctx.scissor = None
@@ -2319,6 +2699,44 @@ class LiveBoxerViewer(OrbitViewer):
     def render_ui(self) -> None:
         self._clamp_panel_widths()
         win_w, win_h = self.wnd.size
+        splitter_w = 8.0
+
+        def render_splitter(name: str, center_x: float, on_drag):
+            x0 = int(round(center_x - splitter_w * 0.5))
+            imgui.set_next_window_position(x0, 0, imgui.ALWAYS)
+            imgui.set_next_window_size(int(splitter_w), win_h, imgui.ALWAYS)
+            flags = (
+                imgui.WINDOW_NO_MOVE
+                | imgui.WINDOW_NO_RESIZE
+                | imgui.WINDOW_NO_TITLE_BAR
+                | imgui.WINDOW_NO_SCROLLBAR
+                | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS
+            )
+            imgui.begin(name, flags=flags)
+            draw_list = imgui.get_window_draw_list()
+            win_pos = imgui.get_window_position()
+            hovered = imgui.is_window_hovered()
+            active_col = imgui.get_color_u32_rgba(0.92, 0.92, 0.92, 0.95)
+            idle_col = imgui.get_color_u32_rgba(0.62, 0.62, 0.62, 0.85)
+            col = active_col if hovered or imgui.is_item_active() else idle_col
+            draw_list.add_line(
+                win_pos.x + splitter_w * 0.5,
+                win_pos.y,
+                win_pos.x + splitter_w * 0.5,
+                win_pos.y + win_h,
+                col,
+                2.0,
+            )
+            imgui.set_cursor_pos((0.0, 0.0))
+            imgui.invisible_button(
+                f"##{name}_drag", imgui.ImVec2(float(splitter_w), float(win_h))
+            )
+            if imgui.is_item_active():
+                dx = float(imgui.get_io().mouse_delta.x)
+                if abs(dx) > 0.0:
+                    on_drag(dx)
+                    self._clamp_panel_widths()
+            imgui.end()
 
         # Left: control panel
         imgui.set_next_window_position(0, 0, imgui.ALWAYS)
@@ -2330,35 +2748,50 @@ class LiveBoxerViewer(OrbitViewer):
             | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS,
         )
         imgui.text(f"FPS: {self._fps:.1f}")
-        imgui.text(f"RGB pipeline: {self._rgb_pipeline_ms:.1f} ms")
         imgui.text(f"OWL: {self._owl_ms:.1f} ms")
         imgui.text(f"Boxer: {self._boxer_ms:.1f} ms")
+        imgui.text(f"FSP: {self._fs_infer_ms:.1f} ms")
         imgui.text(f"Total frame: {self._total_frame_ms:.1f} ms")
         imgui.text(f"2D detections: {self._n_2d}")
         imgui.text(f"3D detections: {self._n_3d}")
+        boxer_sdp_count = (
+            0
+            if self._fs_boxer_pts_world is None
+            else min(len(self._fs_boxer_pts_world), int(self.fs_boxer_max_points))
+        )
+        imgui.text(f"Boxer SDP pts: {boxer_sdp_count}")
+        imgui.text(
+            f"Boxer SDP patches: {self._boxer_sdp_patch_valid}  median depth: {self._boxer_sdp_patch_median:.3f} m"
+        )
         imgui.separator()
-        slider_w = max(160, int(self.ui_panel_width) - 28)
-        imgui.push_item_width(slider_w)
+        label_w = max(110.0, min(180.0, self.ui_panel_width * 0.42))
+        slider_w = max(110.0, float(self.ui_panel_width) - label_w - 36.0)
 
         def labeled_slider_float(label, value, min_value, max_value, fmt="%.3f"):
             imgui.text(label)
+            imgui.same_line(label_w)
+            imgui.push_item_width(slider_w)
             changed, value = imgui.slider_float(
                 f"##{label}", value, min_value, max_value, fmt
             )
+            imgui.pop_item_width()
             return changed, value
 
         def labeled_slider_int(label, value, min_value, max_value):
             imgui.text(label)
+            imgui.same_line(label_w)
+            imgui.push_item_width(slider_w)
             changed, value = imgui.slider_int(
                 f"##{label}", value, min_value, max_value
             )
+            imgui.pop_item_width()
             return changed, value
 
         _, self.ui_panel_width = labeled_slider_float(
             "UI width", self.ui_panel_width, 240, 560, "%.0f"
         )
         _, self.rgb_panel_width = labeled_slider_float(
-            "Image width", self.rgb_panel_width, 320, 1100, "%.0f"
+            "Image width", self.rgb_panel_width, 320, 1500, "%.0f"
         )
         imgui.separator()
         _, self.thresh2d = labeled_slider_float(
@@ -2376,15 +2809,6 @@ class LiveBoxerViewer(OrbitViewer):
         _, self.line_width = labeled_slider_float(
             "3D scene OBB line width", self.line_width, 1.0, 10.0
         )
-        _, self.axis_line_width = labeled_slider_float(
-            "XYZ axis line width", self.axis_line_width, 1.0, 12.0
-        )
-        axis_len_changed, self.axis_length = labeled_slider_float(
-            "XYZ axis length", self.axis_length, 0.1, 2.0
-        )
-        if axis_len_changed and self._axis_origin is not None:
-            self._rebuild_world_axes(self._axis_origin)
-        imgui.pop_item_width()
         imgui.separator()
         _, self.enable_owl = imgui.checkbox("Enable OWL", self.enable_owl)
         boxer_enabled = self.enable_boxer
@@ -2392,15 +2816,18 @@ class LiveBoxerViewer(OrbitViewer):
         self.enable_boxer = boxer_enabled and self.enable_owl
         if not self.enable_owl:
             imgui.text("Boxer requires OWL proposals")
+        _, self.use_fs_for_boxer_sdp = imgui.checkbox(
+            "Use FS points for Boxer SDP", self.use_fs_for_boxer_sdp
+        )
+        _, self.rectify_rgb_for_owl_boxes = imgui.checkbox(
+            "Rectify RGB for OWL", self.rectify_rgb_for_owl_boxes
+        )
         _, self.bb3_use_class_colors = imgui.checkbox(
             "3DBB class/prompt colors", self.bb3_use_class_colors
         )
         if self.fs_state is not None:
             _, self.enable_foundation_stereo = imgui.checkbox(
                 "Enable FoundationStereo", self.enable_foundation_stereo
-            )
-            _, self.fs_debug_stats = imgui.checkbox(
-                "Print fs debug stats", self.fs_debug_stats
             )
         imgui.separator()
         _, self.show_obbs_3d = imgui.checkbox("Show 3D OBBs", self.show_obbs_3d)
@@ -2410,20 +2837,6 @@ class LiveBoxerViewer(OrbitViewer):
         )
         if self.fs_state is not None:
             imgui.separator()
-            imgui.text(
-                f"FS points: {self.fs_point_count}  infer: {self._fs_infer_ms:.1f} ms"
-            )
-            imgui.text(f"FS points in 3DBBs: {self._fs_points_in_obbs}")
-            imgui.text(
-                f"FS FPS: {self._fs_processed / max(time.time() - self._fs_t0, 1e-6):.2f}  median: {self._fs_median_depth:.3f} m"
-            )
-            imgui.text(
-                f"FS depth min/mean/max: {self._fs_min_depth:.3f} / {self._fs_mean_depth:.3f} / {self._fs_max_depth:.3f} m"
-            )
-            imgui.text("FS depth uses metric meters")
-            _, self.vio_world_is_y_up = imgui.checkbox(
-                "FS VIO world is Y-up", self.vio_world_is_y_up
-            )
             _, self.show_fs_points = imgui.checkbox(
                 "Show fs points", self.show_fs_points
             )
@@ -2433,14 +2846,14 @@ class LiveBoxerViewer(OrbitViewer):
             _, self.fs_color_points_by_obb = imgui.checkbox(
                 "FS color by containing 3DBB", self.fs_color_points_by_obb
             )
-            _, self.show_fs_frustum = imgui.checkbox(
-                "Show fs frustum", self.show_fs_frustum
-            )
             _, self.fs_point_size = labeled_slider_float(
                 "FS point size", self.fs_point_size, 1.0, 8.0
             )
             _, self.fs_point_alpha = labeled_slider_float(
                 "FS point alpha", self.fs_point_alpha, 0.05, 1.0
+            )
+            _, self.fs_boxer_max_points = labeled_slider_int(
+                "FS->Boxer max points", self.fs_boxer_max_points, 1000, 50000
             )
             follow_clicked = imgui.button(
                 "Follow view" if not self.follow_mode else "Free orbit"
@@ -2475,12 +2888,34 @@ class LiveBoxerViewer(OrbitViewer):
                 | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS,
             )
             if expanded:
+                _, self.show_rgb_fs_points = imgui.checkbox(
+                    "Show FS Points", self.show_rgb_fs_points
+                )
+                _, self.show_rgb_fs = imgui.checkbox("Show FS SDP", self.show_rgb_fs)
+                _, self.show_rgb_owl = imgui.checkbox("Show OWL", self.show_rgb_owl)
+                _, self.show_rgb_boxer = imgui.checkbox(
+                    "Show Boxer 3DBB", self.show_rgb_boxer
+                )
+                imgui.separator()
                 avail_w, avail_h = imgui.get_content_region_available()
                 scale = min(avail_w / tex_w, avail_h / tex_h)
                 imgui.image(
                     self._rgb_texture.glo, tex_w * scale, tex_h * scale
                 )
             imgui.end()
+
+        render_splitter(
+            "##splitter_ui_rgb",
+            float(self.ui_panel_width),
+            lambda dx: setattr(self, "ui_panel_width", float(self.ui_panel_width) + dx),
+        )
+        render_splitter(
+            "##splitter_rgb_3d",
+            float(self.ui_panel_width + self.rgb_panel_width),
+            lambda dx: setattr(
+                self, "rgb_panel_width", float(self.rgb_panel_width) + dx
+            ),
+        )
 
     def on_key_event(self, key, action, modifiers):
         super().on_key_event(key, action, modifiers)
@@ -2499,6 +2934,8 @@ class LiveFoundationStereoViewer(OrbitViewer):
     fs_valid_iters: int = 16
     fs_point_stride: int = 2
     fs_max_depth: float = 5.0
+    consistency: bool = False
+    consistency_threshold: float = 1.0
 
     ui_panel_width = 360
 
@@ -2665,7 +3102,10 @@ class LiveFoundationStereoViewer(OrbitViewer):
         if foundation_path not in sys.path:
             sys.path.insert(0, foundation_path)
         self.fs_runtime = FoundationStereoRuntime(
-            self.fs_ckpt, self.fs_valid_iters
+            self.fs_ckpt,
+            self.fs_valid_iters,
+            consistency=self.consistency,
+            consistency_threshold=self.consistency_threshold,
         )
 
     def _upload_line_data(self, attr: str, data: np.ndarray) -> None:
@@ -3067,6 +3507,17 @@ def parse_args():
     p.add_argument("--thresh2d", type=float, default=0.25)
     p.add_argument("--thresh3d", type=float, default=0.5)
     p.add_argument("--detector_hw", type=int, default=960)
+    p.add_argument(
+        "--max_steps",
+        type=int,
+        default=0,
+        help="Close the live combined viewer after N render steps (0 = no limit).",
+    )
+    p.add_argument(
+        "--rectify",
+        action="store_true",
+        help="Rectify RGB fisheye to pinhole before OWL, then map 2D boxes back to fisheye before Boxer.",
+    )
     p.add_argument("--image_hw", type=int, default=None)
     p.add_argument(
         "--ckpt",
@@ -3116,6 +3567,17 @@ def parse_args():
     )
     p.add_argument("--fs_max_depth", type=float, default=5.0)
     p.add_argument("--fs_valid_iters", type=int, default=16)
+    p.add_argument(
+        "--consistency",
+        action="store_true",
+        help="Enable FoundationStereo left-right disparity consistency filtering.",
+    )
+    p.add_argument(
+        "--consistency_threshold",
+        type=float,
+        default=1.0,
+        help="LR consistency threshold in pixels (default 1.0).",
+    )
     p.add_argument(
         "--fs_ckpt",
         type=str,
@@ -3347,15 +3809,19 @@ def main():
         LiveBoxerViewer.sem_id_to_name = sem_id_to_name
         LiveBoxerViewer.HW = HW
         LiveBoxerViewer.detector_hw = args.detector_hw
+        LiveBoxerViewer.rectify_rgb_for_owl_boxes = bool(args.rectify)
         LiveBoxerViewer.init_thresh3d = args.thresh3d
         LiveBoxerViewer.dev = dev
         LiveBoxerViewer.pdtype = pdtype
         LiveBoxerViewer.debug_geometry = args.debug_geometry
         LiveBoxerViewer.live_rotation = args.live_rotation
+        LiveBoxerViewer.max_steps = int(args.max_steps)
         LiveBoxerViewer.fs_state = fs_state
         LiveBoxerViewer.fs_ckpt = args.fs_ckpt
         LiveBoxerViewer.fs_hw = int(args.fs_hw)
         LiveBoxerViewer.fs_valid_iters = int(args.fs_valid_iters)
+        LiveBoxerViewer.consistency = bool(args.consistency)
+        LiveBoxerViewer.consistency_threshold = float(args.consistency_threshold)
         LiveBoxerViewer.fs_point_stride = int(args.fs_point_stride)
         LiveBoxerViewer.fs_max_depth = float(args.fs_max_depth)
         if args.fs or args.owl or args.boxer:

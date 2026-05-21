@@ -15,8 +15,19 @@ def parse_args():
     parser.add_argument("--ckpt_path", required=True, type=str)
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument("--width", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--valid_iters", type=int, default=16)
     parser.add_argument("--opset", type=int, default=22)
+    parser.add_argument(
+        "--dynamo",
+        action="store_true",
+        help="Use the newer torch.export-based ONNX exporter.",
+    )
+    parser.add_argument(
+        "--dynamic_batch",
+        action="store_true",
+        help="Export ONNX with dynamic batch axis instead of a fixed batch size.",
+    )
     return parser.parse_args()
 
 
@@ -55,22 +66,27 @@ def main():
     model.load_state_dict(ckpt["model"])
     model.cuda().eval()
 
-    left_img = torch.randn(1, 3, cfg.height, cfg.width, device="cuda").float()
-    right_img = torch.randn(1, 3, cfg.height, cfg.width, device="cuda").float()
+    batch_size = int(args.batch_size)
+    left_img = torch.randn(batch_size, 3, cfg.height, cfg.width, device="cuda").float()
+    right_img = torch.randn(batch_size, 3, cfg.height, cfg.width, device="cuda").float()
+
+    export_kwargs = {}
+    if args.dynamic_batch:
+        export_kwargs["dynamic_axes"] = {
+            "left": {0: "batch_size"},
+            "right": {0: "batch_size"},
+            "disp": {0: "batch_size"},
+        }
 
     torch.onnx.export(
         model,
         (left_img, right_img),
         args.save_path,
-        dynamo=False,
+        dynamo=bool(args.dynamo),
         opset_version=int(args.opset),
         input_names=["left", "right"],
         output_names=["disp"],
-        dynamic_axes={
-            "left": {0: "batch_size"},
-            "right": {0: "batch_size"},
-            "disp": {0: "batch_size"},
-        },
+        **export_kwargs,
     )
 
 
