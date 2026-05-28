@@ -39,6 +39,40 @@ from utils.tw.tensor_utils import (
 from utils.video import make_mp4, safe_delete_folder
 
 
+def _is_remove360(input_path: str) -> bool:
+    """Return True if input_path looks like a Remove360 sequence directory."""
+    # Bare name like "bedroom_table" that resolves to sample_data/remove360/...
+    candidate = input_path
+    if not os.path.isabs(candidate) and not os.path.exists(candidate):
+        candidate = os.path.join(SAMPLE_DATA_PATH, "remove360", input_path)
+    if os.path.exists(os.path.join(candidate, "sparse")):
+        return True
+    if os.path.exists(os.path.join(candidate, "images")) and os.path.exists(
+        os.path.join(candidate, "sparse")
+    ):
+        return True
+    # Absolute or relative path that contains sparse/
+    if os.path.exists(input_path) and os.path.isdir(input_path):
+        if os.path.exists(os.path.join(input_path, "sparse")):
+            return True
+    return False
+
+
+def _resolve_remove360_path(input_path: str) -> str:
+    """Resolve a Remove360 sequence path, searching sample_data/remove360/ if needed."""
+    if os.path.isabs(input_path) and os.path.exists(input_path):
+        return input_path
+    if os.path.exists(input_path):
+        return os.path.abspath(input_path)
+    candidate = os.path.join(SAMPLE_DATA_PATH, "remove360", input_path)
+    if os.path.exists(candidate):
+        return candidate
+    raise FileNotFoundError(
+        f"Remove360 sequence not found: {input_path}. "
+        f"Run scripts/download_remove360.py and scripts/run_colmap.sh first."
+    )
+
+
 def jet_color(val):
     """Map a scalar in [0, 1] to an RGB tuple via OpenCV's JET colormap."""
     val = max(0.0, min(1.0, float(val)))
@@ -149,6 +183,10 @@ def main():
     elif args.input.startswith("ca1m"):
         dataset_type = "ca1m"
         seq_name = args.input
+    elif _is_remove360(args.input):
+        dataset_type = "remove360"
+        seq_dir = _resolve_remove360_path(args.input)
+        seq_name = os.path.basename(seq_dir.rstrip("/"))
     else:
         dataset_type = "aria"
         remote_root = args.input
@@ -232,6 +270,16 @@ def main():
             skip_frames=args.skip_n,
             max_frames=args.max_n,
             resize=(args.detector_hw, args.detector_hw),
+        )
+    elif dataset_type == "remove360":
+        from loaders.remove360_loader import Remove360Loader
+
+        print(f"==> Loading Remove360 sequence: {seq_dir}")
+        loader = Remove360Loader(
+            seq_dir=seq_dir,
+            skip_frames=args.skip_n,
+            max_frames=args.max_n,
+            start_frame=args.start_n - 1,
         )
     else:
         from loaders.aria_loader import AriaLoader

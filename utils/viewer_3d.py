@@ -578,6 +578,40 @@ def build_seq_ctx(input_path, dataset_type):
             "time_to_uids_slamr": None,
             "uid_to_p3": None,
         }
+    elif dataset_type == "remove360":
+        from loaders.remove360_loader import Remove360Loader
+
+        loader = Remove360Loader(
+            input_path,
+            skip_frames=1,
+            max_frames=None,
+            start_frame=0,
+            use_masks=False,
+        )
+        rgb_timestamps = loader.pose_ts  # already np.int64
+        n = len(rgb_timestamps)
+        # T_world_rig = T_world_cam @ T_cam_rig (T_cam_rig is identity for monocular)
+        traj = [
+            (loader.Ts_wc[i] @ loader.cams[i].T_camera_rig).float() for i in range(n)
+        ]
+        return {
+            "source": "remove360",
+            "rgb_num_frames": n,
+            "rgb_timestamps": rgb_timestamps,
+            "rgb_images": None,
+            "is_nebula": True,
+            "traj": traj,
+            "pose_ts": rgb_timestamps,
+            "calibs": loader.cams,
+            "calib_ts": rgb_timestamps,
+            "loader": loader,
+            "sdp_global": loader.sdp_global.numpy()
+            if len(loader.sdp_global) > 0
+            else None,
+            "time_to_uids_slaml": None,
+            "time_to_uids_slamr": None,
+            "uid_to_p3": None,
+        }
     elif dataset_type == "scannet":
         annotation_path = os.path.join(
             SAMPLE_DATA_PATH, "scannet", "full_annotations.json"
@@ -798,6 +832,9 @@ def resolve_input(input_str):
         return input_str, "omni3d", input_str
     elif input_str.startswith("ca1m"):
         return input_str, "ca1m", input_str
+    elif _is_remove360_seq(input_str):
+        path = _resolve_remove360_seq(input_str)
+        return path, "remove360", os.path.basename(path.rstrip("/"))
     else:
         input_path = input_str
         if not os.path.isabs(input_path) and not os.path.exists(input_path):
@@ -809,6 +846,28 @@ def resolve_input(input_str):
                 input_path = legacy
         seq_name = input_path.rstrip("/").split("/")[-1]
         return input_path, "aria", seq_name
+
+
+def _is_remove360_seq(input_str: str) -> bool:
+    """True if input looks like a Remove360 sequence (has sparse/ inside)."""
+    candidate = input_str
+    if not os.path.isabs(candidate) and not os.path.exists(candidate):
+        candidate = os.path.join(SAMPLE_DATA_PATH, "remove360", input_str)
+    if not os.path.isdir(candidate):
+        return False
+    return os.path.exists(os.path.join(candidate, "sparse"))
+
+
+def _resolve_remove360_seq(input_str: str) -> str:
+    """Resolve to absolute Remove360 sequence path."""
+    if os.path.isabs(input_str) and os.path.exists(input_str):
+        return input_str
+    if os.path.exists(input_str):
+        return os.path.abspath(input_str)
+    candidate = os.path.join(SAMPLE_DATA_PATH, "remove360", input_str)
+    if os.path.exists(candidate):
+        return candidate
+    raise FileNotFoundError(f"Remove360 sequence not found: {input_str}")
 
 
 def load_view_file(log_dir, load_view_arg):
@@ -2045,6 +2104,10 @@ class OBBViewer(OrbitViewer):
         end_points = corners[batch_indices, end_idx]  # (N, 12, 3)
 
         # Expand colors and probs to match edges
+        # Guard against 0-dim scalar when N=1 (single OBB) — probs gets squeezed
+        # upstream into shape=[] which breaks the [:, None] indexing below.
+        if probs.dim() == 0:
+            probs = probs.unsqueeze(0)
         colors_expanded = colors[:, None, :].expand(N, 12, 3)  # (N, 12, 3)
         probs_expanded = probs[:, None].expand(N, 12)  # (N, 12)
 
@@ -3142,6 +3205,16 @@ class SequenceOBBViewer(OBBViewer):
                     self._rgb_lru_cache.popitem(last=False)
         elif (
             getattr(self, "_data_source", None) == "omni3d" and self._loader is not None
+        ):
+            datum = self._loader.load(idx)
+            img_t = datum["img0"][0].permute(1, 2, 0).cpu().numpy()
+            img = np.clip(img_t * 255.0, 0, 255).astype(np.uint8)
+            self._rgb_lru_cache[ts_key] = img
+            if len(self._rgb_lru_cache) > self._rgb_lru_max_items:
+                self._rgb_lru_cache.popitem(last=False)
+        elif (
+            getattr(self, "_data_source", None) == "remove360"
+            and self._loader is not None
         ):
             datum = self._loader.load(idx)
             img_t = datum["img0"][0].permute(1, 2, 0).cpu().numpy()

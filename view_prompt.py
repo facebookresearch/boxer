@@ -866,6 +866,14 @@ def main():
                 img_t = datum["img0"][0].permute(1, 2, 0).cpu().numpy()
                 return np.clip(img_t * 255.0, 0, 255).astype(np.uint8)
             elif (
+                getattr(self, "_data_source", None) == "remove360"
+                and self._loader is not None
+            ):
+                idx = int(find_nearest2(self._rgb_timestamps, ts_ns))
+                datum = self._loader.load(idx)
+                img_t = datum["img0"][0].permute(1, 2, 0).cpu().numpy()
+                return np.clip(img_t * 255.0, 0, 255).astype(np.uint8)
+            elif (
                 getattr(self, "_data_source", None) == "ca1m"
                 and self._loader is not None
             ):
