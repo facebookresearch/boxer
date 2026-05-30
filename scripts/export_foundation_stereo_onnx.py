@@ -6,6 +6,7 @@ import os
 import sys
 
 import torch
+import torch.nn as nn
 from omegaconf import OmegaConf
 
 
@@ -28,6 +29,16 @@ def parse_args():
         action="store_true",
         help="Export ONNX with dynamic batch axis instead of a fixed batch size.",
     )
+    parser.add_argument(
+        "--no_constant_folding",
+        action="store_true",
+        help="Disable ONNX constant folding to reduce peak export memory.",
+    )
+    parser.add_argument(
+        "--fp32_export",
+        action="store_true",
+        help="Disable model autocast while exporting the ONNX graph.",
+    )
     return parser.parse_args()
 
 
@@ -38,12 +49,38 @@ def main():
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
 
-    from core.foundation_stereo import FoundationStereo
+    import core.foundation_stereo as foundation_stereo_mod
+    import core.geometry as geometry_mod
+    import core.utils.utils as utils_mod
+
+    def normalize_image_for_export(img):
+        mean = img.new_tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        std = img.new_tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+        return ((img / 255.0 - mean) / std).contiguous()
+
+    foundation_stereo_mod.normalize_image = normalize_image_for_export
+
+    def bilinear_sampler_for_export(img, coords, mode="bilinear", mask=False, low_memory=False):
+        h, w = img.shape[-2:]
+        xgrid, ygrid = coords.split([1, 1], dim=-1)
+        xgrid = 2 * xgrid / (w - 1) - 1
+        grid = torch.cat([xgrid, ygrid], dim=-1).to(img.dtype)
+        img = torch.nn.functional.grid_sample(
+            img.contiguous(), grid.contiguous(), align_corners=True, mode=mode
+        )
+        if mask:
+            mask = (xgrid > -1) & (ygrid > -1) & (xgrid < 1) & (ygrid < 1)
+            return img, mask.float()
+        return img
+
+    utils_mod.bilinear_sampler = bilinear_sampler_for_export
+    geometry_mod.bilinear_sampler = bilinear_sampler_for_export
+    FoundationStereo = foundation_stereo_mod.FoundationStereo
 
     class FoundationStereoOnnx(FoundationStereo):
         @torch.no_grad()
         def forward(self, left, right):
-            with torch.amp.autocast("cuda", enabled=True):
+            with torch.amp.autocast("cuda", enabled=not bool(args.fp32_export)):
                 return FoundationStereo.forward(
                     self, left, right, iters=self.args.valid_iters, test_mode=True
                 )
@@ -56,6 +93,8 @@ def main():
     cfg.height = int(args.height)
     cfg.width = int(args.width)
     cfg.valid_iters = int(args.valid_iters)
+    if args.fp32_export:
+        cfg.mixed_precision = False
     if "vit_size" not in cfg:
         cfg["vit_size"] = "vitl"
     logging.warning("args:\n%s", cfg)
@@ -64,6 +103,16 @@ def main():
     model = FoundationStereoOnnx(cfg)
     ckpt = torch.load(args.ckpt_path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model"])
+
+    class AdaptiveMaxPool2dOneForExport(nn.Module):
+        def forward(self, x):
+            return torch.amax(x, dim=(-2, -1), keepdim=True)
+
+    for module in model.modules():
+        for name, child in list(module.named_children()):
+            if isinstance(child, nn.AdaptiveMaxPool2d) and child.output_size == 1:
+                setattr(module, name, AdaptiveMaxPool2dOneForExport())
+
     model.cuda().eval()
 
     batch_size = int(args.batch_size)
@@ -86,6 +135,8 @@ def main():
         opset_version=int(args.opset),
         input_names=["left", "right"],
         output_names=["disp"],
+        do_constant_folding=not bool(args.no_constant_folding),
+        external_data=True,
         **export_kwargs,
     )
 

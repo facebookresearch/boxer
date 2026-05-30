@@ -99,6 +99,8 @@ class BoundingBox3DTracker:
         merge_interval: int = 5,
         min_confidence_mass: float = 4.0,
         min_obs_points: int = 2,
+        duplicate_center_threshold_m: float = 0.5,
+        duplicate_iou_2d_threshold: float = 0.65,
         verbose: bool = True,
     ) -> None:
         """
@@ -117,6 +119,8 @@ class BoundingBox3DTracker:
             merge_iou_2d_threshold: Min 2D IoU (projected) between tracks to consider merging as secondary criterion
             merge_interval: Run merge every N frames (1 = every frame, 10 = every 10th frame)
             min_confidence_mass: Accumulated confidence to promote TENTATIVE -> ACTIVE (alternative to min_hits)
+            duplicate_center_threshold_m: Max center distance for same-prompt duplicate suppression
+            duplicate_iou_2d_threshold: Min projected 2D IoU for same-prompt duplicate suppression
         """
         self.iou_threshold = iou_threshold
         self.min_hits = min_hits
@@ -131,11 +135,21 @@ class BoundingBox3DTracker:
         self.merge_interval = merge_interval
         self.min_confidence_mass = min_confidence_mass
         self.min_obs_points = min_obs_points
+        self.duplicate_center_threshold_m = duplicate_center_threshold_m
+        self.duplicate_iou_2d_threshold = duplicate_iou_2d_threshold
         self.verbose = verbose
 
         self.tracks: list[TrackedInstance] = []
         self._next_id: int = 0
         self.last_iou_matrix_size: tuple[int, int] = (0, 0)
+        self.last_matches: list[tuple[int, int]] = []
+        self.assoc_2d_iou_weight = 0.35
+        self.assoc_2d_iou_threshold = 0.15
+        self.reacquire_iou_threshold = max(0.05, min(0.2, 0.8 * iou_threshold))
+        self.reacquire_iou_2d_threshold = 0.35
+        self.reacquire_semantic_threshold = min(
+            merge_semantic_threshold, 0.55
+        )
         self._embedding_cache: dict[str, torch.Tensor] = {}
         self._embed_model = None
         self._embed_thread = None
@@ -194,6 +208,7 @@ class BoundingBox3DTracker:
             List of active tracked instances
         """
         # Filter detections by confidence threshold
+        self.last_matches = []
         if len(detections) > 0 and self.conf_threshold > 0:
             conf_mask = (detections.prob >= self.conf_threshold).reshape(-1)
             detections = detections[conf_mask]
@@ -253,11 +268,31 @@ class BoundingBox3DTracker:
             iou_matrix = iou_result.cpu()  # (V, N)
             t_iou = time.perf_counter()
 
-            # Build cost matrix for Hungarian assignment
-            cost_matrix = 1.0 - iou_matrix.numpy()
+            visible_obbs_tw = ObbTW(
+                torch.stack(
+                    [self.tracks[i].obb._data.squeeze() for i in visible_indices]
+                )
+            )
+            iou_2d_matrix = self._projected_iou_2d_matrix(
+                visible_obbs_tw,
+                detections,
+                cam=cam,
+                T_world_rig=T_world_rig,
+            )
 
-            # Gate invalid pairs (IoU below threshold)
+            # Build cost matrix for Hungarian assignment
+            assoc_sim = iou_matrix.clone()
+            if iou_2d_matrix is not None:
+                assoc_sim = assoc_sim + self.assoc_2d_iou_weight * iou_2d_matrix
+            cost_matrix = 1.0 - assoc_sim.numpy()
+
+            # Gate invalid pairs. Thin wall objects can enter through 2D overlap
+            # even when 3D IoU is unstable.
             invalid_mask = iou_matrix.numpy() < self.iou_threshold
+            if iou_2d_matrix is not None:
+                invalid_mask &= (
+                    iou_2d_matrix.numpy() < self.assoc_2d_iou_threshold
+                )
             cost_matrix[invalid_mask] = 1e6
 
             # Hungarian assignment
@@ -275,19 +310,55 @@ class BoundingBox3DTracker:
                     )
                     matched_tracks.add(original_idx)
                     matched_detections.add(c)
+                    self.last_matches.append((c, self.tracks[original_idx].track_id))
         else:
             t_iou = t0
             t_hungarian = t0
 
         self.last_iou_matrix_size = (V, N)
 
+        # Secondary association pass for unmatched detections. This is looser
+        # than the visible-only Hungarian stage and lets a detection reattach to
+        # an existing track that was temporarily marked invisible or drifted just
+        # below the main IoU gate, instead of spawning an overlapping duplicate.
+        for j in range(N):
+            if j in matched_detections:
+                continue
+            candidate_indices = [i for i in range(M) if i not in matched_tracks]
+            reacquired_idx = self._find_reacquire_track(
+                detections[j],
+                candidate_indices,
+                cam=cam,
+                T_world_rig=T_world_rig,
+            )
+            if reacquired_idx is None:
+                continue
+            self._update_track(self.tracks[reacquired_idx], detections[j], frame_idx)
+            matched_tracks.add(reacquired_idx)
+            matched_detections.add(j)
+            self.last_matches.append((j, self.tracks[reacquired_idx].track_id))
+
         # Create new tracks from unmatched detections
         t_create0 = time.perf_counter()
         n_created = 0
+        n_suppressed = 0
         for j in range(N):
-            if j not in matched_detections:
-                self._create_track(detections[j], frame_idx)
-                n_created += 1
+            if j in matched_detections:
+                continue
+            duplicate_idx = self._find_duplicate_suppression_track(
+                detections[j],
+                list(range(len(self.tracks))),
+                cam=cam,
+                T_world_rig=T_world_rig,
+            )
+            if duplicate_idx is not None:
+                matched_detections.add(j)
+                matched_tracks.add(duplicate_idx)
+                self.last_matches.append((j, self.tracks[duplicate_idx].track_id))
+                n_suppressed += 1
+                continue
+            self._create_track(detections[j], frame_idx)
+            n_created += 1
         t_create = time.perf_counter()
 
         # Age unmatched tracks: unmatched visible + all invisible
@@ -329,7 +400,7 @@ class BoundingBox3DTracker:
                 f"  [BENCH] tracker.update ({V}v/{M}x{N}): "
                 f"iou={(t_iou - t0) * 1000:.1f}ms  "
                 f"hungarian={(t_hungarian - t_iou) * 1000:.1f}ms  "
-                f"create({n_created})={(t_create - t_create0) * 1000:.1f}ms  "
+                f"create({n_created}, suppressed={n_suppressed})={(t_create - t_create0) * 1000:.1f}ms  "
                 f"age({len(unmatched_indices)})={(t_age - t_create) * 1000:.1f}ms  "
                 f"merge={(t_merge - t_remove) * 1000:.1f}ms  "
                 f"tracks={len(self.tracks)}(T={n_tent}/A={n_active}/I={n_inactive}) "
@@ -337,6 +408,57 @@ class BoundingBox3DTracker:
             )
 
         return self._get_active_tracks()
+
+    def _projected_iou_2d_matrix(
+        self,
+        lhs_obbs: ObbTW,
+        rhs_obbs: ObbTW,
+        cam: Optional[CameraTW] = None,
+        T_world_rig: Optional[PoseTW] = None,
+    ) -> Optional[torch.Tensor]:
+        if cam is None or T_world_rig is None or len(lhs_obbs) == 0 or len(rhs_obbs) == 0:
+            return None
+        lhs_bb2, lhs_valid = lhs_obbs.get_pseudo_bb2(
+            cam.unsqueeze(0),
+            T_world_rig.unsqueeze(0),
+            num_samples_per_edge=1,
+            valid_ratio=0.1667,
+        )
+        rhs_bb2, rhs_valid = rhs_obbs.get_pseudo_bb2(
+            cam.unsqueeze(0),
+            T_world_rig.unsqueeze(0),
+            num_samples_per_edge=1,
+            valid_ratio=0.1667,
+        )
+        lhs_bb2 = lhs_bb2.squeeze(0)
+        rhs_bb2 = rhs_bb2.squeeze(0)
+        lhs_valid = lhs_valid.squeeze(0)
+        rhs_valid = rhs_valid.squeeze(0)
+
+        l_xmin, l_xmax, l_ymin, l_ymax = (
+            lhs_bb2[:, 0],
+            lhs_bb2[:, 1],
+            lhs_bb2[:, 2],
+            lhs_bb2[:, 3],
+        )
+        r_xmin, r_xmax, r_ymin, r_ymax = (
+            rhs_bb2[:, 0],
+            rhs_bb2[:, 1],
+            rhs_bb2[:, 2],
+            rhs_bb2[:, 3],
+        )
+        ix_min = torch.maximum(l_xmin[:, None], r_xmin[None, :])
+        ix_max = torch.minimum(l_xmax[:, None], r_xmax[None, :])
+        iy_min = torch.maximum(l_ymin[:, None], r_ymin[None, :])
+        iy_max = torch.minimum(l_ymax[:, None], r_ymax[None, :])
+        inter = (ix_max - ix_min).clamp(min=0) * (iy_max - iy_min).clamp(min=0)
+        lhs_area = (l_xmax - l_xmin) * (l_ymax - l_ymin)
+        rhs_area = (r_xmax - r_xmin) * (r_ymax - r_ymin)
+        union = lhs_area[:, None] + rhs_area[None, :] - inter
+        iou_2d = inter / (union + 1e-8)
+        valid_mask = lhs_valid[:, None] & rhs_valid[None, :]
+        iou_2d[~valid_mask] = 0.0
+        return iou_2d
 
     def _create_track(self, detection: ObbTW, frame_idx: int) -> None:
         """Create a new track from a detection."""
@@ -357,6 +479,230 @@ class BoundingBox3DTracker:
             cached_text=text_label,
         )
         self.tracks.append(track)
+
+    def _detection_text(self, detection: ObbTW) -> str:
+        try:
+            return detection.reshape(1, -1).text_string()[0]
+        except Exception:
+            return "?"
+
+    def _same_prompt_track_detection(
+        self, track: TrackedInstance, detection: ObbTW
+    ) -> bool:
+        track_text = track.cached_text.strip().lower()
+        det_text = self._detection_text(detection).strip().lower()
+        if track_text and det_text and track_text != "?" and track_text == det_text:
+            return True
+        try:
+            return int(track.obb.sem_id.item()) == int(detection.sem_id.item())
+        except Exception:
+            return False
+
+    def _find_duplicate_suppression_track(
+        self,
+        detection: ObbTW,
+        candidate_indices: list[int],
+        cam: Optional[CameraTW] = None,
+        T_world_rig: Optional[PoseTW] = None,
+    ) -> Optional[int]:
+        if (
+            cam is None
+            or T_world_rig is None
+            or not candidate_indices
+            or self.duplicate_iou_2d_threshold <= 0
+        ):
+            return None
+
+        candidate_tracks = [
+            self.tracks[i]
+            for i in candidate_indices
+            if self._same_prompt_track_detection(self.tracks[i], detection)
+        ]
+        if not candidate_tracks:
+            return None
+
+        candidate_obbs = ObbTW(
+            torch.stack([t.obb._data.squeeze() for t in candidate_tracks])
+        )
+        detection_batch = detection.reshape(1, -1)
+        cand_bb2, cand_valid = candidate_obbs.get_pseudo_bb2(
+            cam.unsqueeze(0),
+            T_world_rig.unsqueeze(0),
+            num_samples_per_edge=1,
+            valid_ratio=0.1667,
+        )
+        det_bb2, det_valid = detection_batch.get_pseudo_bb2(
+            cam.unsqueeze(0),
+            T_world_rig.unsqueeze(0),
+            num_samples_per_edge=1,
+            valid_ratio=0.1667,
+        )
+        cand_bb2 = cand_bb2.squeeze(0)
+        cand_valid = cand_valid.squeeze(0)
+        if not bool(det_valid.squeeze(0)[0].item()):
+            return None
+
+        det_bb2 = det_bb2.squeeze(0)[0]
+        xmin, xmax, ymin, ymax = (
+            cand_bb2[:, 0],
+            cand_bb2[:, 1],
+            cand_bb2[:, 2],
+            cand_bb2[:, 3],
+        )
+        dxmin, dxmax, dymin, dymax = (
+            det_bb2[0],
+            det_bb2[1],
+            det_bb2[2],
+            det_bb2[3],
+        )
+        ix_min = torch.maximum(xmin, dxmin)
+        ix_max = torch.minimum(xmax, dxmax)
+        iy_min = torch.maximum(ymin, dymin)
+        iy_max = torch.minimum(ymax, dymax)
+        inter = (ix_max - ix_min).clamp(min=0) * (iy_max - iy_min).clamp(min=0)
+        cand_area = (xmax - xmin) * (ymax - ymin)
+        det_area = (dxmax - dxmin) * (dymax - dymin)
+        union = cand_area + det_area - inter
+        iou_2d = inter / (union + 1e-8)
+        iou_2d[~cand_valid] = 0.0
+
+        det_center = detection.T_world_object.t.reshape(1, 3)
+        cand_centers = torch.stack(
+            [t.obb.T_world_object.t.reshape(3) for t in candidate_tracks]
+        )
+        center_dist = torch.norm(cand_centers - det_center, dim=1)
+        ok = (
+            (iou_2d >= self.duplicate_iou_2d_threshold)
+            & (center_dist <= self.duplicate_center_threshold_m)
+        )
+        if not bool(ok.any().item()):
+            return None
+
+        scores = iou_2d - 0.05 * center_dist
+        scores[~ok] = -1.0
+        best_local = int(torch.argmax(scores).item())
+        best_track = candidate_tracks[best_local]
+        for idx in candidate_indices:
+            if self.tracks[idx].track_id == best_track.track_id:
+                return idx
+        return None
+
+    def _semantic_similarity_track_detection(
+        self, track: TrackedInstance, detection: ObbTW
+    ) -> float:
+        det_text = self._detection_text(detection)
+        track_text = track.cached_text
+        if track_text != "?" and track_text == det_text:
+            return 1.0
+        override = _SEM_OVERRIDES.get((track_text.lower(), det_text.lower()))
+        if override is not None:
+            return float(override)
+        try:
+            if int(track.obb.sem_id.item()) == int(detection.sem_id.item()):
+                return 1.0
+        except Exception:
+            pass
+        if track_text == "?" or det_text == "?":
+            return 0.0
+        return float(
+            torch.dot(
+                self._get_text_embedding(track_text),
+                self._get_text_embedding(det_text),
+            ).item()
+        )
+
+    def _find_reacquire_track(
+        self,
+        detection: ObbTW,
+        candidate_indices: list[int],
+        cam: Optional[CameraTW] = None,
+        T_world_rig: Optional[PoseTW] = None,
+    ) -> Optional[int]:
+        if not candidate_indices:
+            return None
+
+        candidate_tracks = [self.tracks[i] for i in candidate_indices]
+        candidate_obbs = ObbTW(
+            torch.stack([t.obb._data.squeeze() for t in candidate_tracks])
+        )
+        detection_batch = detection.reshape(1, -1)
+        iou_3d = iou_mc7(
+            candidate_obbs,
+            detection_batch,
+            samp_per_dim=self.samp_per_dim,
+            verbose=False,
+        ).reshape(-1)
+
+        iou_2d = torch.zeros_like(iou_3d)
+        if cam is not None and T_world_rig is not None:
+            cand_bb2, cand_valid = candidate_obbs.get_pseudo_bb2(
+                cam.unsqueeze(0),
+                T_world_rig.unsqueeze(0),
+                num_samples_per_edge=1,
+                valid_ratio=0.1667,
+            )
+            det_bb2, det_valid = detection_batch.get_pseudo_bb2(
+                cam.unsqueeze(0),
+                T_world_rig.unsqueeze(0),
+                num_samples_per_edge=1,
+                valid_ratio=0.1667,
+            )
+            cand_bb2 = cand_bb2.squeeze(0)
+            cand_valid = cand_valid.squeeze(0)
+            det_valid = bool(det_valid.squeeze(0)[0].item())
+            if det_valid:
+                det_bb2 = det_bb2.squeeze(0)[0]
+                xmin, xmax, ymin, ymax = (
+                    cand_bb2[:, 0],
+                    cand_bb2[:, 1],
+                    cand_bb2[:, 2],
+                    cand_bb2[:, 3],
+                )
+                dxmin, dxmax, dymin, dymax = (
+                    det_bb2[0],
+                    det_bb2[1],
+                    det_bb2[2],
+                    det_bb2[3],
+                )
+                ix_min = torch.maximum(xmin, dxmin)
+                ix_max = torch.minimum(xmax, dxmax)
+                iy_min = torch.maximum(ymin, dymin)
+                iy_max = torch.minimum(ymax, dymax)
+                inter = (ix_max - ix_min).clamp(min=0) * (iy_max - iy_min).clamp(min=0)
+                cand_area = (xmax - xmin) * (ymax - ymin)
+                det_area = (dxmax - dxmin) * (dymax - dymin)
+                union = cand_area + det_area - inter
+                iou_2d = inter / (union + 1e-8)
+                iou_2d[~cand_valid] = 0.0
+
+        det_center = detection.T_world_object.t.reshape(1, 3)
+        cand_centers = torch.stack(
+            [t.obb.T_world_object.t.reshape(3) for t in candidate_tracks]
+        )
+        center_dist = torch.norm(cand_centers - det_center, dim=1)
+
+        best_idx = None
+        best_score = -1e9
+        for local_idx, track in enumerate(candidate_tracks):
+            sem_sim = self._semantic_similarity_track_detection(track, detection)
+            if sem_sim < self.reacquire_semantic_threshold:
+                continue
+            overlap_ok = (
+                float(iou_3d[local_idx].item()) >= self.reacquire_iou_threshold
+                or float(iou_2d[local_idx].item()) >= self.reacquire_iou_2d_threshold
+            )
+            if not overlap_ok:
+                continue
+            score = (
+                3.0 * float(iou_3d[local_idx].item())
+                + 2.0 * float(iou_2d[local_idx].item())
+                + 0.5 * sem_sim
+                - 0.1 * float(center_dist[local_idx].item())
+            )
+            if score > best_score:
+                best_score = score
+                best_idx = candidate_indices[local_idx]
+        return best_idx
 
     def _get_text_embedding(self, text: str) -> torch.Tensor:
         """Get normalized text embedding, using persistent cache."""
@@ -1000,3 +1346,4 @@ class BoundingBox3DTracker:
         """Reset tracker state."""
         self.tracks = []
         self._next_id = 0
+        self.last_matches = []

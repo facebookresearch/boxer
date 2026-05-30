@@ -44,6 +44,7 @@ COLOR_BUTTON = int(_imgui.Col_.button)
 COLOR_BUTTON_HOVERED = int(_imgui.Col_.button_hovered)
 COLOR_BUTTON_ACTIVE = int(_imgui.Col_.button_active)
 COLOR_TEXT = int(_imgui.Col_.text)
+COLOR_WINDOW_BG = int(_imgui.Col_.window_bg)
 
 # Input text flags
 INPUT_TEXT_ENTER_RETURNS_TRUE = int(_imgui.InputTextFlags_.enter_returns_true)
@@ -102,6 +103,13 @@ def image(texture_id, width, height, **kwargs):
 def input_text(label, value, buffer_length=256, flags=0):
     """pyimgui takes buffer_length; imgui-bundle does not."""
     changed, new_value = _imgui.input_text(label, value, flags)
+    return changed, new_value
+
+
+def input_text_multiline(label, value, width, height, flags=0):
+    changed, new_value = _imgui.input_text_multiline(
+        label, value, _imgui.ImVec2(width, height), flags
+    )
     return changed, new_value
 
 

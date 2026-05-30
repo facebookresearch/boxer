@@ -21,6 +21,7 @@ Usage:
 """
 
 import platform
+from typing import Any, Dict, Optional, Tuple
 
 # --- macOS activation policy fix (MUST be done before any window code) ---
 if platform.system() == "Darwin":
@@ -183,6 +184,7 @@ class OrbitViewer(mglw.WindowConfig):
         self.mouse_sensitivity = 0.3
         self.pan_sensitivity = 0.002
         self.zoom_sensitivity = 0.05
+        self.orbit_pick_enabled = True
 
         # Enable depth testing and backface culling
         self.ctx.enable(self.ctx.DEPTH_TEST)
@@ -247,6 +249,76 @@ class OrbitViewer(mglw.WindowConfig):
         mvp = model @ view @ projection
 
         return projection, view, mvp
+
+    def _get_camera_position(self) -> np.ndarray:
+        azimuth_rad = np.radians(self.camera_azimuth)
+        elevation_rad = np.radians(self.camera_elevation)
+        camera_x = self.camera_distance * np.cos(elevation_rad) * np.cos(azimuth_rad)
+        camera_y = self.camera_distance * np.cos(elevation_rad) * np.sin(azimuth_rad)
+        camera_z = self.camera_distance * np.sin(elevation_rad)
+        return self.camera_target + np.array([camera_x, camera_y, camera_z])
+
+    def _get_3d_viewport_origin_x(self) -> int:
+        full_w, _ = self.wnd.size
+        vw, _ = self._get_3d_viewport_size()
+        return int(full_w - vw)
+
+    def _is_in_3d_viewport(self, x: float, y: float) -> bool:
+        vp_x = self._get_3d_viewport_origin_x()
+        vw, vh = self._get_3d_viewport_size()
+        return vp_x <= x < (vp_x + vw) and 0 <= y < vh
+
+    def _get_orbit_pick_points(self) -> Optional[np.ndarray]:
+        return None
+
+    def _pick_orbit_target(self, x: float, y: float) -> bool:
+        if not self.orbit_pick_enabled:
+            return False
+        points = self._get_orbit_pick_points()
+        if points is None:
+            return False
+        points = np.asarray(points, dtype=np.float32)
+        if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0:
+            return False
+        finite = np.all(np.isfinite(points), axis=1)
+        if not np.any(finite):
+            return False
+        points = points[finite]
+
+        vp_x = self._get_3d_viewport_origin_x()
+        vw, vh = self._get_3d_viewport_size()
+        local_x = float(x - vp_x)
+        local_y = float(y)
+        _, _, mvp = self.get_camera_matrices()
+        mvp_t = np.asarray(mvp, dtype=np.float32).T
+        pts_h = np.concatenate(
+            [points, np.ones((points.shape[0], 1), dtype=np.float32)], axis=1
+        )
+        clip = pts_h @ mvp_t.T
+        w = clip[:, 3]
+        valid = w > 1e-6
+        if not np.any(valid):
+            return False
+        clip = clip[valid]
+        points = points[valid]
+        w = w[valid]
+        ndc = clip[:, :3] / w[:, None]
+        valid = (
+            np.isfinite(ndc).all(axis=1)
+            & (clip[:, 2] >= 0.0)
+            & (np.abs(ndc[:, 0]) <= 1.0)
+            & (np.abs(ndc[:, 1]) <= 1.0)
+        )
+        if not np.any(valid):
+            return False
+        ndc = ndc[valid]
+        points = points[valid]
+        screen_x = (ndc[:, 0] * 0.5 + 0.5) * vw
+        screen_y = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * vh
+        dist2 = (screen_x - local_x) ** 2 + (screen_y - local_y) ** 2
+        idx = int(np.argmin(dist2))
+        self.camera_target = points[idx].astype(np.float32)
+        return True
 
     # -----------------------------
     # MACOS WINDOW FOCUS WORKAROUND
@@ -385,8 +457,7 @@ class OrbitViewer(mglw.WindowConfig):
     def on_mouse_position_event(self, x, y, dx, dy):
         self.imgui.mouse_position_event(x, y, dx, dy)
 
-        # Reset mouse state if cursor is over the UI panel
-        if x < getattr(self, "ui_panel_width", 0):
+        if not self._is_in_3d_viewport(x, y):
             self.mouse_dragging = False
             self.mouse_panning = False
             self.last_mouse_pos = None
@@ -394,7 +465,7 @@ class OrbitViewer(mglw.WindowConfig):
     def on_mouse_drag_event(self, x, y, dx, dy):
         self.imgui.mouse_drag_event(x, y, dx, dy)
 
-        if x >= getattr(self, "ui_panel_width", 0):
+        if self._is_in_3d_viewport(x, y):
             if self.mouse_dragging:
                 # Orbit (rotate camera)
                 self.camera_azimuth -= dx * self.mouse_sensitivity
@@ -424,7 +495,8 @@ class OrbitViewer(mglw.WindowConfig):
 
         # Use mouse position to decide if scroll should go to UI or 3D viewport
         mouse_x = io.mouse_pos.x if hasattr(io.mouse_pos, "x") else io.mouse_pos[0]
-        if mouse_x >= getattr(self, "ui_panel_width", 0):
+        mouse_y = io.mouse_pos.y if hasattr(io.mouse_pos, "y") else io.mouse_pos[1]
+        if self._is_in_3d_viewport(mouse_x, mouse_y):
             # Zoom (change camera distance)
             self.camera_distance *= 1.0 + y_offset * self.zoom_sensitivity
             self.camera_distance = np.clip(self.camera_distance, 0.01, 50.0)
@@ -432,14 +504,14 @@ class OrbitViewer(mglw.WindowConfig):
     def on_mouse_press_event(self, x, y, button):
         self.imgui.mouse_press_event(x, y, button)
 
-        # Deterministic position-based check: the UI panel occupies x < ui_panel_width
-        should_capture = x < getattr(self, "ui_panel_width", 0)
+        should_capture = not self._is_in_3d_viewport(x, y)
 
         if not should_capture:
             if button == 1:  # Left mouse button - pan
                 self.mouse_panning = True
                 self.last_mouse_pos = (x, y)
             elif button == 2:  # Right mouse button - orbit
+                self._pick_orbit_target(x, y)
                 self.mouse_dragging = True
                 self.last_mouse_pos = (x, y)
         else:
@@ -476,7 +548,6 @@ import time as time_module
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import moderngl
