@@ -10,6 +10,10 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+try:
+    from torchvision.ops import batched_nms
+except Exception:
+    batched_nms = None
 
 from owl.clip_tokenizer import CLIPTokenizer
 from owl.owlv2_model import (
@@ -187,6 +191,7 @@ class OwlWrapper(nn.Module):
         precision="float32",
         warmup=True,
         nms_iou_threshold=0.5,
+        max_candidates=None,
     ):
         super().__init__()
         _debug = os.environ.get("DEBUG", "0") == "1"
@@ -239,6 +244,11 @@ class OwlWrapper(nn.Module):
         self.text_prompts = text_prompts
         self.min_confidence = min_confidence
         self.nms_iou_threshold = nms_iou_threshold
+        max_candidates_env = os.environ.get("OWL_MAX_CANDIDATES")
+        if max_candidates_env is not None:
+            self.max_candidates = int(max_candidates_env)
+        else:
+            self.max_candidates = max_candidates
         if precision is not None:
             self.use_bfloat16 = precision == "bfloat16" and device not in ("cpu", "mps")
         else:
@@ -289,6 +299,14 @@ class OwlWrapper(nn.Module):
             self.text_embeddings = self.text_embeddings.to(device)
             _dbg(f"encode_text ({len(text_prompts)} prompts) + save cache")
         self.query_mask = torch.ones(len(text_prompts), dtype=torch.bool, device=device)
+        self._profile_forward_idx = 0
+        self._profile_forward_sums = {
+            "preprocess": 0.0,
+            "model": 0.0,
+            "gpu_filter": 0.0,
+            "cpu_post": 0.0,
+            "total": 0.0,
+        }
 
         print(
             f"Loaded OWLv2 on {device} with {len(text_prompts)} text prompts, precision={'bfloat16' if self.use_bfloat16 else 'float32'}"
@@ -330,6 +348,15 @@ class OwlWrapper(nn.Module):
     @torch.no_grad()
     def forward(self, image_torch, rotated=False, resize_to_HW=(906, 906)):
         _debug = os.environ.get("DEBUG", "0") == "1"
+        _profile = os.environ.get("OWL_PROFILE", "0") == "1"
+        _profile_every = max(1, int(os.environ.get("OWL_PROFILE_EVERY", "25")))
+        _use_cuda_timing = self.device == "cuda" and torch.cuda.is_available()
+
+        def _sync_time():
+            if _use_cuda_timing:
+                torch.cuda.synchronize()
+            return time.perf_counter()
+
         assert len(image_torch.shape) == 4, "input image should be 4D tensor"
         assert image_torch.shape[0] == 1, "only batch size 1 is supported"
         if (
@@ -339,9 +366,8 @@ class OwlWrapper(nn.Module):
         ):
             print("warning: input image should be in [0, 255] as a float")
 
-        if _debug:
-            torch.cuda.synchronize()
-            _t0 = time.perf_counter()
+        if _debug or _profile:
+            _t0 = _sync_time()
 
         input_image = image_torch.clone()
         if rotated:
@@ -364,9 +390,8 @@ class OwlWrapper(nn.Module):
         if self.use_bfloat16:
             pixel_values = pixel_values.to(dtype=torch.bfloat16)
 
-        if _debug:
-            torch.cuda.synchronize()
-            _t1 = time.perf_counter()
+        if _debug or _profile:
+            _t1 = _sync_time()
 
         # Forward pass (vision + detection)
         logits, pred_boxes = self.vision_detector(
@@ -375,9 +400,8 @@ class OwlWrapper(nn.Module):
             self.query_mask,
         )
 
-        if _debug:
-            torch.cuda.synchronize()
-            _t2 = time.perf_counter()
+        if _debug or _profile:
+            _t2 = _sync_time()
 
         # Postprocess in float32 for numerical stability
         logits = logits.float()
@@ -388,14 +412,42 @@ class OwlWrapper(nn.Module):
         scores_all = torch.sigmoid(scores_all)
 
         keep = scores_all > self.min_confidence
-        scores = scores_all[keep].cpu()
-        labels = labels_all[keep].cpu()
+        candidate_idx = keep.nonzero(as_tuple=True)[0]
+        num_candidates = int(candidate_idx.numel())
+        if (
+            self.max_candidates is not None
+            and self.max_candidates > 0
+            and num_candidates > self.max_candidates
+        ):
+            candidate_scores = scores_all[candidate_idx]
+            top_idx = candidate_scores.topk(self.max_candidates).indices
+            candidate_idx = candidate_idx[top_idx]
+        num_selected_candidates = int(candidate_idx.numel())
+        keep = candidate_idx
         boxes_cxcywh = pred_boxes[0, keep]  # [N, 4] normalized cxcywh
 
         empty_return = torch.zeros((0, 4)), torch.zeros(0), torch.zeros(0), None
 
+        if _debug or _profile:
+            _t_filter = _sync_time()
+
         if len(boxes_cxcywh) == 0:
+            if _profile:
+                self._print_forward_profile(
+                    _t0,
+                    _t1,
+                    _t2,
+                    _t_filter,
+                    _sync_time(),
+                    0,
+                    0,
+                    0,
+                    _profile_every,
+                )
             return empty_return
+
+        scores = scores_all[keep]
+        labels = labels_all[keep]
 
         # Convert cxcywh -> xyxy, scale to original image size
         cx, cy, w, h = boxes_cxcywh.unbind(-1)
@@ -403,12 +455,12 @@ class OwlWrapper(nn.Module):
         y1 = (cy - h / 2) * HH
         x2 = (cx + w / 2) * WW
         y2 = (cy + h / 2) * HH
-        boxes = torch.stack([x1, y1, x2, y2], dim=-1).cpu()
+        boxes = torch.stack([x1, y1, x2, y2], dim=-1)
 
         # Filter out very large or small boxes (false positives)
         too_big = (x2 - x1 > 0.9 * WW) | (y2 - y1 > 0.9 * HH)
         too_small = (x2 - x1 < 0.05 * WW) | (y2 - y1 < 0.05 * HH)
-        keep = ~(too_big | too_small).cpu()
+        keep = ~(too_big | too_small)
         boxes = boxes[keep]
         scores = scores[keep]
         labels = labels[keep]
@@ -418,12 +470,32 @@ class OwlWrapper(nn.Module):
 
         # Per-class NMS
         if self.nms_iou_threshold < 1.0:
-            keep = _per_class_nms(boxes, scores, labels, self.nms_iou_threshold)
+            if batched_nms is not None and boxes.is_cuda:
+                keep = batched_nms(boxes, scores, labels, self.nms_iou_threshold)
+            else:
+                keep = _per_class_nms(
+                    boxes.cpu(),
+                    scores.cpu(),
+                    labels.cpu(),
+                    self.nms_iou_threshold,
+                )
             boxes = boxes[keep]
             scores = scores[keep]
             labels = labels[keep]
 
         if len(boxes) == 0:
+            if _profile:
+                self._print_forward_profile(
+                    _t0,
+                    _t1,
+                    _t2,
+                    _t_filter,
+                    _sync_time(),
+                    num_candidates,
+                    num_selected_candidates,
+                    0,
+                    _profile_every,
+                )
             return empty_return
 
         # Convert x1, y1, x2, y2 -> x1, x2, y1, y2 convention
@@ -438,6 +510,10 @@ class OwlWrapper(nn.Module):
             new_y2 = WW - x1
             boxes = torch.stack([new_x1, new_x2, new_y1, new_y2], dim=-1)
 
+        boxes = boxes.cpu()
+        scores = scores.cpu()
+        labels = labels.cpu()
+
         if _debug:
             _t3 = time.perf_counter()
             print(
@@ -447,5 +523,58 @@ class OwlWrapper(nn.Module):
                 f"total: {(_t3 - _t0) * 1000:.1f}ms",
                 flush=True,
             )
+        if _profile:
+            self._print_forward_profile(
+                _t0,
+                _t1,
+                _t2,
+                _t_filter,
+                _sync_time(),
+                num_candidates,
+                num_selected_candidates,
+                len(boxes),
+                _profile_every,
+            )
 
         return boxes, scores, labels, None
+
+    def _print_forward_profile(
+        self,
+        t0,
+        t1,
+        t2,
+        t_filter,
+        t3,
+        num_candidates,
+        num_selected_candidates,
+        num_boxes,
+        profile_every,
+    ):
+        values = {
+            "preprocess": (t1 - t0) * 1000.0,
+            "model": (t2 - t1) * 1000.0,
+            "gpu_filter": (t_filter - t2) * 1000.0,
+            "cpu_post": (t3 - t_filter) * 1000.0,
+            "total": (t3 - t0) * 1000.0,
+        }
+        self._profile_forward_idx += 1
+        for key, value in values.items():
+            self._profile_forward_sums[key] += value
+        idx = self._profile_forward_idx
+        if idx <= 5 or idx % profile_every == 0:
+            means = {
+                key: self._profile_forward_sums[key] / idx
+                for key in self._profile_forward_sums
+            }
+            print(
+                "==> owl_profile "
+                f"iter={idx} candidates={num_candidates} selected={num_selected_candidates} "
+                f"boxes={num_boxes} "
+                f"pre={values['preprocess']:.1f}ms model={values['model']:.1f}ms "
+                f"gpu_filter={values['gpu_filter']:.1f}ms cpu_post={values['cpu_post']:.1f}ms "
+                f"total={values['total']:.1f}ms | "
+                f"avg_pre={means['preprocess']:.1f}ms avg_model={means['model']:.1f}ms "
+                f"avg_gpu_filter={means['gpu_filter']:.1f}ms avg_cpu_post={means['cpu_post']:.1f}ms "
+                f"avg_total={means['total']:.1f}ms",
+                flush=True,
+            )

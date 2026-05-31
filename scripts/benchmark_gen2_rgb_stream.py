@@ -23,7 +23,7 @@ from scripts.live_boxer import connect_with_ip_fallback, ensure_aria_tools_on_pa
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--profile_name", type=str, default="profile9")
+    p.add_argument("--profile_name", type=str, default="profile10")
     p.add_argument("--seconds", type=float, default=20.0)
     p.add_argument("--wifi", action="store_true")
     p.add_argument("--ip", type=str, default=None)
@@ -83,6 +83,7 @@ def main() -> None:
     stream_receiver = receiver.StreamReceiver(
         enable_image_decoding=True, enable_raw_stream=False
     )
+    stream_receiver.set_rgb_queue_size(1)
     stream_receiver.set_server_config(srv_cfg)
     stream_receiver.register_rgb_callback(rgb_callback)
     stream_receiver.start_server()

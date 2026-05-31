@@ -15,10 +15,14 @@ DEFAULT_FOUNDATION_STEREO_CKPT = (
 
 FOUNDATION_STEREO_MODEL_CANDIDATES = [
     os.environ.get("BOXER_FS_CKPT", ""),
-    os.path.join(CKPT_PATH, "fs_256wh_16it_bf16_all_convtranspose_fp32.engine"),
+    os.path.join(CKPT_PATH, "fs_256wh_16it_bf16_dino_costagg_grus_encoder_fp16.engine"),
     os.path.join(
         os.path.dirname(CKPT_PATH),
         "tmp/foundation_stereo_trt_256/tensorrt_fp32.engine",
+    ),
+    os.path.join(
+        os.path.dirname(CKPT_PATH),
+        "tmp/foundation_stereo_trt_320/tensorrt_fp32_dynamo.engine",
     ),
     os.path.join(CKPT_PATH, "fs_320wh_16it_bf16_all_convtranspose_fp32.engine"),
     os.path.join(CKPT_PATH, "fs_384wh_12it_bf16_all_convtranspose_fp32.engine"),
@@ -37,12 +41,21 @@ FS_MODEL_PRESETS = {
     # ckpts/fast_foundationstereo_512.engine is excluded: it returns all-NaN disparity.
     "bf16": "/home/demo/Downloads/model_best_bp2.pth",
     "f256torchbf16": "/home/demo/Downloads/model_best_bp2.pth",
-    "f256": os.path.join(CKPT_PATH, "fs_256wh_16it_bf16_all_convtranspose_fp32.engine"),  # ~78 ms
+    "f256": os.path.join(
+        CKPT_PATH, "fs_256wh_16it_bf16_dino_costagg_grus_encoder_fp16.engine"
+    ),  # parity-checked, ~70 ms
     "f256fp32": os.path.join(
         os.path.dirname(CKPT_PATH),
         "tmp/foundation_stereo_trt_256/tensorrt_fp32.engine",
     ),
-    "f320": os.path.join(CKPT_PATH, "fs_320wh_16it_bf16_all_convtranspose_fp32.engine"),  # ~123 ms
+    "f320": os.path.join(
+        os.path.dirname(CKPT_PATH),
+        "tmp/foundation_stereo_trt_320/tensorrt_fp32_dynamo.engine",
+    ),  # parity-checked, ~236 ms
+    "f320fp32": os.path.join(
+        os.path.dirname(CKPT_PATH),
+        "tmp/foundation_stereo_trt_320/tensorrt_fp32_dynamo.engine",
+    ),
     "f384": os.path.join(CKPT_PATH, "fs_384wh_12it_bf16_all_convtranspose_fp32.engine"),  # ~143 ms
     "f512": os.path.join(CKPT_PATH, "fs_512wh_8it_bf16_all_convtranspose_fp32.engine"),  # ~233 ms
     "fast512": os.path.join(
@@ -56,10 +69,11 @@ FS_MODEL_PRESETS = {
 
 FS_MODEL_PRESET_HELP = {
     "bf16": "FoundationStereo 256 PyTorch BF16 autocast (~113 ms)",
-    "f256": "FoundationStereo 256 TensorRT (~78 ms)",
+    "f256": "FoundationStereo 256 mixed BF16/FP16 TensorRT (parity-checked, ~70 ms)",
     "f256fp32": "FoundationStereo 256 FP32 TensorRT (parity-checked)",
     "f256torchbf16": "FoundationStereo 256 PyTorch BF16 autocast (~113 ms)",
-    "f320": "FoundationStereo 320 TensorRT (~123 ms)",
+    "f320": "FoundationStereo 320 FP32 TensorRT (parity-checked, ~236 ms)",
+    "f320fp32": "FoundationStereo 320 FP32 TensorRT (parity-checked, ~236 ms)",
     "f384": "FoundationStereo 384 TensorRT (~143 ms)",
     "f512": "FoundationStereo 512 TensorRT (~233 ms)",
     "fast512": "Fast-FS 512 BF16 ConvTranspose-FP32 TensorRT (~82 ms)",

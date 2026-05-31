@@ -15,7 +15,7 @@ import torch
 
 
 DEFAULT_CKPT = "/home/demo/Downloads/model_best_bp2.pth"
-DEFAULT_ENGINE = "ckpts/fs_256wh_16it_bf16_all_convtranspose_fp32.engine"
+DEFAULT_ENGINE = "ckpts/fs_256wh_16it_bf16_dino_costagg_grus_encoder_fp16.engine"
 
 
 def _enabled() -> bool:

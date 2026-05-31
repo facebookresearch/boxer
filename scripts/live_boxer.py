@@ -217,6 +217,7 @@ class FoundationStereoRuntime:
                 raise RuntimeError(
                     f"Failed to create auxiliary TensorRT execution context: {model_path}"
                 )
+            self.trt_stream = torch.cuda.Stream()
             self.trt_overlap_stream0 = torch.cuda.Stream()
             self.trt_overlap_stream1 = torch.cuda.Stream()
             self.trt_input_names = []
@@ -335,6 +336,7 @@ class FoundationStereoRuntime:
                 raise RuntimeError(
                     f"Failed to create Fast-FoundationStereo TRT context: {model_path}"
                 )
+            self.trt_stream = torch.cuda.Stream()
             self.fast_input_names = []
             self.trt_output_names = []
             for i in range(self.trt_engine.num_io_tensors):
@@ -454,6 +456,8 @@ class FoundationStereoRuntime:
         ok = context.execute_async_v3(stream_ptr)
         if not ok:
             raise RuntimeError("TensorRT FoundationStereo inference failed")
+        if stream is not None:
+            torch.cuda.current_stream().wait_stream(stream)
         return outputs[self.trt_output_names[0]].float()
 
     def _infer_batch(
@@ -467,7 +471,9 @@ class FoundationStereoRuntime:
         )
 
         if self.kind == "tensorrt":
-            disp_t = self._run_trt_context(self.trt_context, left_p, right_p, stream=None)
+            disp_t = self._run_trt_context(
+                self.trt_context, left_p, right_p, self.trt_stream
+            )
             return padder.unpad(disp_t).cpu().numpy()
 
         autocast_dtype = get_autocast_dtype_for_cuda()
@@ -493,11 +499,11 @@ class FoundationStereoRuntime:
             )
             disp_t = torch.empty(out_shape, dtype=out_dtype, device="cuda")
             self.trt_context.set_tensor_address(out_name, disp_t.data_ptr())
-            ok = self.trt_context.execute_async_v3(
-                torch.cuda.current_stream().cuda_stream
-            )
+            self.trt_stream.wait_stream(torch.cuda.current_stream())
+            ok = self.trt_context.execute_async_v3(self.trt_stream.cuda_stream)
             if not ok:
                 raise RuntimeError("Fast-FoundationStereo TensorRT inference failed")
+            torch.cuda.current_stream().wait_stream(self.trt_stream)
             return disp_t.float().cpu().numpy()
 
         if self.kind == "fast_onnx":
@@ -825,6 +831,14 @@ def apply_live_rotation(
     raise ValueError(f"Unknown live rotation mode: {mode}")
 
 
+def live_resized_rgb_to_bgr(arr_rgb: np.ndarray, mode: str) -> np.ndarray:
+    if mode == "cw":
+        arr_rgb = np.rot90(arr_rgb, k=3)
+    elif mode == "ccw":
+        arr_rgb = np.rot90(arr_rgb, k=1)
+    return cv2.cvtColor(np.ascontiguousarray(arr_rgb), cv2.COLOR_RGB2BGR)
+
+
 def rectify_rgb_for_owl(
     img_torch: torch.Tensor,
     fisheye_cam: CameraTW,
@@ -1031,6 +1045,7 @@ def run_inference(
 
     frame, T_wr, intr, T_cr, csize = state.snapshot()
     bench_mark("snapshot")
+    t_after_snapshot = time.perf_counter()
     if frame is None or T_wr is None or intr is None or T_cr is None:
         return None
 
@@ -1043,6 +1058,7 @@ def run_inference(
         img_torch, cam, live_rotation
     )
     bench_mark("preprocess")
+    t_after_preprocess = time.perf_counter()
     owl_img_torch = img_torch
     owl_cam = cam
     owl_rotated0 = rotated0
@@ -1090,8 +1106,8 @@ def run_inference(
             with state.lock:
                 state.rectify_debug_logged = True
     bench_mark("rectify")
+    t_after_rectify = time.perf_counter()
     sdp_w = boxer_sdp_w if boxer_sdp_w is not None else torch.zeros(0, 3)
-    t_start = time.perf_counter()
     use_cuda_timing = dev == "cuda" and torch.cuda.is_available()
 
     debug_this_frame = debug_geometry and not state.debug_geometry_logged
@@ -1108,8 +1124,11 @@ def run_inference(
             rotation_policy,
         )
 
+    t_before_owl_sync = time.perf_counter()
     if use_cuda_timing:
         torch.cuda.synchronize()
+    t_after_owl_sync = time.perf_counter()
+    t_start = time.perf_counter()
     if enable_owl:
         bb2d, scores2d, label_ints, _ = owl.forward(
             owl_img_torch * 255.0,
@@ -1150,6 +1169,7 @@ def run_inference(
     bench_mark("owl_post")
     if use_cuda_timing:
         torch.cuda.synchronize()
+    t_owl_model_done = time.perf_counter()
     if debug_this_frame:
         if bb2d.shape[0] > 0:
             print(
@@ -1169,7 +1189,7 @@ def run_inference(
     rotated_bool = bool(rotated0.item())
 
     # Center panel: RGB with 2D and projected 3D overlays.
-    viz_rgb = torch2cv2(img_torch, rotate=rotated_bool, ensure_rgb=True)
+    viz_rgb = live_resized_rgb_to_bgr(arr_resized, live_rotation)
     if render_cpu_overlays:
         viz_2d = torch2cv2(
             owl_img_torch, rotate=bool(owl_rotated0.item()), ensure_rgb=True
@@ -1201,8 +1221,8 @@ def run_inference(
         put_text(viz_2d, owl_title, scale=0.6, line=0)
         put_text(viz_2d, f"t={ts_ns / 1e9:.3f}s", scale=0.5, line=2)
     viz_3d = viz_rgb.copy() if render_cpu_overlays else viz_rgb
-    t_owl_done = time.perf_counter()
     bench_mark("viz_2d")
+    t_viz_2d_done = time.perf_counter()
 
     obb_pr_w = ObbTW(torch.zeros(0, 165))
     scores3d = torch.zeros(0)
@@ -1213,11 +1233,13 @@ def run_inference(
     sdp_patch_median = float("nan")
     n_2d = bb2d.shape[0]
     n_3d = 0
-    t_boxer_done = t_owl_done
+    t_boxer_start = time.perf_counter()
+    t_boxer_done = t_boxer_start
 
     if enable_boxer and n_2d > 0:
         if use_cuda_timing:
             torch.cuda.synchronize()
+            t_boxer_start = time.perf_counter()
         datum = {
             "img0": img_torch,
             "cam0": cam,
@@ -1258,6 +1280,7 @@ def run_inference(
         labels3d = [labels2d[i] for i in range(len(labels2d)) if keepers[i]]
         n_3d = len(labels3d)
         bench_mark("boxer_post", sync_cuda=True)
+        t_boxer_model_done = time.perf_counter()
 
         if n_3d > 0:
             sem_ids3d = obb_pr_w.sem_id.squeeze(-1).cpu().numpy().astype(int).tolist()
@@ -1290,11 +1313,32 @@ def run_inference(
             torch.cuda.synchronize()
         t_boxer_done = time.perf_counter()
     else:
+        t_boxer_model_done = t_boxer_start
         bench_mark("boxer_skip")
+        t_boxer_done = time.perf_counter()
 
+    t_final_overlay_start = time.perf_counter()
     if render_cpu_overlays:
         put_text(viz_3d, "Projected BoxerNet 3DBBs", scale=0.6, line=0)
-    bench_times["rgb_total"] = (time.perf_counter() - bench_total_t0) * 1000.0
+    t_rgb_total_done = time.perf_counter()
+    timings = {
+        "snapshot": (t_after_snapshot - bench_total_t0) * 1000.0,
+        "preprocess": (t_after_preprocess - t_after_snapshot) * 1000.0,
+        "rectify": (t_after_rectify - t_after_preprocess) * 1000.0,
+        "setup": (t_before_owl_sync - t_after_rectify) * 1000.0,
+        "gpu_wait": (t_after_owl_sync - t_before_owl_sync) * 1000.0,
+        "owl": (t_owl_model_done - t_start) * 1000.0,
+        "owl_render": (t_viz_2d_done - t_owl_model_done) * 1000.0,
+        "boxer_setup": (t_boxer_start - t_viz_2d_done) * 1000.0,
+        "boxer": (t_boxer_model_done - t_boxer_start) * 1000.0,
+        "boxer_render": (t_boxer_done - t_boxer_model_done) * 1000.0,
+        "post_boxer": (t_final_overlay_start - t_boxer_done) * 1000.0,
+        "final_overlay": (t_rgb_total_done - t_final_overlay_start) * 1000.0,
+    }
+    timings["rgb_sum"] = sum(timings.values())
+    timings["rgb_actual"] = (t_rgb_total_done - bench_total_t0) * 1000.0
+    timings["rgb_gap"] = timings["rgb_actual"] - timings["rgb_sum"]
+    bench_times["rgb_total"] = timings["rgb_actual"]
 
     return {
         "viz_rgb_bgr": viz_rgb,
@@ -1310,8 +1354,8 @@ def run_inference(
         "sdp_patch0": sdp_patch.cpu() if sdp_patch is not None else None,
         "sdp_patch_valid": sdp_patch_valid,
         "sdp_patch_median": sdp_patch_median,
-        "owl_ms": (t_owl_done - t_start) * 1000.0,
-        "boxer_ms": (t_boxer_done - t_owl_done) * 1000.0,
+        "owl_ms": timings["owl"],
+        "boxer_ms": timings["boxer"],
         "rgb_infer_ms": (t_boxer_done - t_start) * 1000.0,
         "T_wr": T_wr,
         "cam": cam,
@@ -1320,6 +1364,7 @@ def run_inference(
         "n_3d": n_3d,
         "ts_ns": ts_ns,
         "bench": bench_times,
+        "timings": timings,
     }
 
 
@@ -1497,7 +1542,19 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_last_apply_t: Optional[float] = None
         self._fs_last_pipeline_ms = 0.0
         self._owl_ms = 0.0
+        self._owl_render_ms = 0.0
         self._boxer_ms = 0.0
+        self._boxer_render_ms = 0.0
+        self._rgb_timing_sum_ms = 0.0
+        self._rgb_timing_actual_ms = 0.0
+        self._rgb_timing_gap_ms = 0.0
+        self._rgb_timing_overhead_ms = 0.0
+        self._loop_timing_sum_ms = 0.0
+        self._loop_timing_actual_ms = 0.0
+        self._loop_timing_gap_ms = 0.0
+        self._loop_timing_overhead_ms = 0.0
+        self._fs_update_ms = 0.0
+        self._rgb_update_ms = 0.0
         self._total_frame_ms = 0.0
         self._render_only_ms = 0.0
         self._bench_enabled = bool(type(self).bench)
@@ -1677,7 +1734,7 @@ class LiveBoxerViewer(OrbitViewer):
         self.camera_target = np.array([0.0, 0.0, 0.0], dtype="f4")
         self._rebuild_world_axes(self.camera_target)
 
-        if self.fs_state is not None:
+        if self.enable_foundation_stereo and self.fs_state is not None:
             self._load_foundation_stereo()
 
     def _reset_tracker_state(self) -> None:
@@ -2045,6 +2102,9 @@ class LiveBoxerViewer(OrbitViewer):
         self._n_3d = result["n_3d"]
         self._owl_ms = float(result["owl_ms"])
         self._boxer_ms = float(result["boxer_ms"])
+        result_timings = dict(result.get("timings", {}))
+        self._owl_render_ms = float(result_timings.get("owl_render", 0.0))
+        self._boxer_render_ms = float(result_timings.get("boxer_render", 0.0))
         self._boxer_sdp_patch_valid = int(result["sdp_patch_valid"])
         self._boxer_sdp_patch_median = float(result["sdp_patch_median"])
         t_convert = time.perf_counter()
@@ -2129,6 +2189,28 @@ class LiveBoxerViewer(OrbitViewer):
         self._rebuild_frustum(result["cam"], result["T_wr"])
         geom_ms = (time.perf_counter() - t_geom) * 1000.0
         infer_total_ms = (time.perf_counter() - infer_t0) * 1000.0
+        rgb_pipeline_sum_ms = float(result_timings.get("rgb_sum", models_ms))
+        rgb_pipeline_actual_ms = float(result_timings.get("rgb_actual", models_ms))
+        models_overhead_ms = models_ms - rgb_pipeline_actual_ms
+        component_measured_sum_ms = (
+            snapshot_ms
+            + sdp_ms
+            + rgb_pipeline_sum_ms
+            + models_overhead_ms
+            + convert_ms
+            + tracker_total_ms
+            + track_viz_ms
+            + panel_render_ms
+            + stack_ms
+            + upload_ms
+            + geom_ms
+        )
+        rgb_update_overhead_ms = infer_total_ms - component_measured_sum_ms
+        component_sum_ms = component_measured_sum_ms + rgb_update_overhead_ms
+        self._rgb_timing_sum_ms = component_sum_ms
+        self._rgb_timing_actual_ms = infer_total_ms
+        self._rgb_timing_gap_ms = infer_total_ms - component_sum_ms
+        self._rgb_timing_overhead_ms = rgb_update_overhead_ms
         prediction_active = bool(self.enable_owl or (self.enable_boxer and self.enable_owl))
         self._prediction_update_ms = infer_total_ms if prediction_active else 0.0
         self._prediction_pending_t0 = infer_t0 if prediction_active else None
@@ -2152,9 +2234,15 @@ class LiveBoxerViewer(OrbitViewer):
                 "snapshot": snapshot_ms,
                 "sdp": sdp_ms,
                 "models_call": models_ms,
-                "rgb_model_total": bench.get("rgb_total", self._owl_ms + self._boxer_ms),
+                "fs_pipeline": self._fs_last_pipeline_ms,
+                "fs_age": self._prediction_fs_age_ms,
+                "rgb_model_sum": rgb_pipeline_sum_ms,
+                "rgb_model_actual": rgb_pipeline_actual_ms,
+                "models_overhead": models_overhead_ms,
                 "owl": self._owl_ms,
+                "owl_render": self._owl_render_ms,
                 "boxer": self._boxer_ms,
+                "boxer_render": self._boxer_render_ms,
                 "convert": convert_ms,
                 "tracker": tracker_total_ms,
                 "track_viz": track_viz_ms,
@@ -2162,9 +2250,10 @@ class LiveBoxerViewer(OrbitViewer):
                 "stack": stack_ms,
                 "upload": upload_ms,
                 "geom": geom_ms,
-                "fs_age": self._prediction_fs_age_ms,
-                "fs_pipeline": self._fs_last_pipeline_ms,
-                "total": infer_total_ms,
+                "overhead": rgb_update_overhead_ms,
+                "sum": component_sum_ms,
+                "actual": infer_total_ms,
+                "gap": infer_total_ms - component_sum_ms,
             }
             if self._bench_should_print(self._bench_infer_idx, infer_total_ms):
                 print(
@@ -3630,6 +3719,15 @@ class LiveBoxerViewer(OrbitViewer):
         if not self.enable_owl:
             self._prediction_fps = 0.0
         loop_body_ms = (time.perf_counter() - loop_t0) * 1000.0
+        self._fs_update_ms = fs_update_ms
+        self._rgb_update_ms = rgb_update_ms
+        loop_measured_sum_ms = self._render_only_ms + fs_update_ms + rgb_update_ms
+        loop_overhead_ms = loop_body_ms - loop_measured_sum_ms
+        loop_component_sum_ms = loop_measured_sum_ms + loop_overhead_ms
+        self._loop_timing_sum_ms = loop_component_sum_ms
+        self._loop_timing_actual_ms = loop_body_ms
+        self._loop_timing_gap_ms = loop_body_ms - loop_component_sum_ms
+        self._loop_timing_overhead_ms = loop_overhead_ms
 
         self._frame_count += 1
         self._bench_loop_idx += 1
@@ -3645,6 +3743,10 @@ class LiveBoxerViewer(OrbitViewer):
                 "fs_update": fs_update_ms,
                 "rgb_update": rgb_update_ms,
                 "draw": self._render_only_ms,
+                "overhead": loop_overhead_ms,
+                "sum": loop_component_sum_ms,
+                "actual": loop_body_ms,
+                "gap": loop_body_ms - loop_component_sum_ms,
                 "pred_e2e": self._prediction_e2e_ms,
                 "pred_period": self._prediction_period_ms,
             }
@@ -3914,12 +4016,26 @@ class LiveBoxerViewer(OrbitViewer):
             f"Pred latency: {self._prediction_e2e_ms:.1f} ms"
         )
         imgui.text(f"Render: {self._render_only_ms:.1f} ms")
-        imgui.text(f"OWL: {self._owl_ms:.1f} ms")
-        imgui.text(f"Boxer: {self._boxer_ms:.1f} ms")
-        imgui.text(f"Tracker: {self._tracker_ms:.1f} ms")
         imgui.text(f"FSP: {self._fs_infer_ms:.1f} ms  every {self.fsp_every}")
         imgui.text(
             f"FS age: {self._prediction_fs_age_ms:.1f} ms  FS pipe: {self._fs_last_pipeline_ms:.1f} ms"
+        )
+        imgui.text(f"OWL: {self._owl_ms:.1f} ms  render {self._owl_render_ms:.1f} ms")
+        imgui.text(
+            f"Boxer: {self._boxer_ms:.1f} ms  render {self._boxer_render_ms:.1f} ms"
+        )
+        imgui.text(f"Tracker: {self._tracker_ms:.1f} ms")
+        imgui.text(
+            f"RGB SUM: {self._rgb_timing_sum_ms:.1f} ms  ACTUAL: {self._rgb_timing_actual_ms:.1f} ms"
+        )
+        imgui.text(
+            f"RGB gap: {self._rgb_timing_gap_ms:+.1f} ms  overhead {self._rgb_timing_overhead_ms:.1f} ms"
+        )
+        imgui.text(
+            f"LOOP SUM: {self._loop_timing_sum_ms:.1f} ms  ACTUAL: {self._loop_timing_actual_ms:.1f} ms"
+        )
+        imgui.text(
+            f"LOOP gap: {self._loop_timing_gap_ms:+.1f} ms  overhead {self._loop_timing_overhead_ms:.1f} ms"
         )
         imgui.text(f"2D detections: {self._n_2d}")
         imgui.text(f"3D detections: {self._n_3d}")
@@ -4781,11 +4897,11 @@ class LiveFoundationStereoViewer(OrbitViewer):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--profile_name", type=str, default="profile9")
+    p.add_argument("--profile_name", type=str, default="profile10")
     p.add_argument("--wifi", action="store_true")
     p.add_argument("--ip", type=str, default=None)
     p.add_argument("--serial", type=str, default=None)
-    p.add_argument("--labels", type=str, default="lvisplus")
+    p.add_argument("--labels", type=str, default="cvpr_demo")
     p.add_argument("--thresh2d", type=float, default=0.25)
     p.add_argument("--thresh3d", type=float, default=0.5)
     p.add_argument("--detector_hw", type=int, default=960)
@@ -4957,20 +5073,27 @@ def main():
     args = parse_args()
     ensure_aria_tools_on_path()
 
-    if args.fs_ckpt is not None and args.fsm is not None:
-        print("==> --fs_ckpt overrides --fsm", flush=True)
-    if args.fs_ckpt is None and args.fsm is not None:
-        args.fs_ckpt = resolve_fs_model_preset(args.fsm)
-    if args.fs_ckpt is None:
-        args.fs_ckpt = resolve_default_foundation_stereo_model()
-    if args.fs_impl == "auto":
-        args.fs_impl = infer_fs_impl_from_model_path(args.fs_ckpt)
-    args.fs_hw = resolve_fs_hw(args.fs_ckpt, args.fs_impl)
-    print(
-        f"==> FS model: {args.fs_ckpt} (preset={args.fsm or 'default'}, "
-        f"impl={args.fs_impl}, hw={args.fs_hw})",
-        flush=True,
-    )
+    selected_components = bool(args.fs or args.owl or args.boxer or args.tracker)
+    enable_fs_requested = bool(args.fs) if selected_components else True
+    if enable_fs_requested:
+        if args.fs_ckpt is not None and args.fsm is not None:
+            print("==> --fs_ckpt overrides --fsm", flush=True)
+        if args.fs_ckpt is None and args.fsm is not None:
+            args.fs_ckpt = resolve_fs_model_preset(args.fsm)
+        if args.fs_ckpt is None:
+            args.fs_ckpt = resolve_default_foundation_stereo_model()
+        if args.fs_impl == "auto":
+            args.fs_impl = infer_fs_impl_from_model_path(args.fs_ckpt)
+        args.fs_hw = resolve_fs_hw(args.fs_ckpt, args.fs_impl)
+        print(
+            f"==> FS model: {args.fs_ckpt} (preset={args.fsm or 'default'}, "
+            f"impl={args.fs_impl}, hw={args.fs_hw})",
+            flush=True,
+        )
+    else:
+        args.fs_ckpt = args.fs_ckpt or ""
+        args.fs_hw = 256
+        print("==> FS disabled; skipping FoundationStereo runtime setup", flush=True)
 
     device_client = sdk_gen2.DeviceClient()
     device_client.set_client_config(sdk_gen2.DeviceClientConfig())
@@ -5001,7 +5124,7 @@ def main():
     device.start_streaming()
 
     state = StreamState()
-    fs_state = LiveFsState()
+    fs_state = LiveFsState() if enable_fs_requested else None
     device_calib_cb, vio_cb, rgb_cb = make_callbacks(state)
     fs_device_calib_cb = None
     fs_slam_cb = None
@@ -5020,6 +5143,10 @@ def main():
     srv.port = 6768
 
     rx = receiver.StreamReceiver(enable_image_decoding=True, enable_raw_stream=False)
+    rx.set_rgb_queue_size(1)
+    rx.set_vio_queue_size(1)
+    if enable_fs_requested or args.slam_probe:
+        rx.set_slam_queue_size(2 if enable_fs_requested else 1)
     rx.set_server_config(srv)
 
     def combined_device_calib_cb(device_calib):
