@@ -63,7 +63,7 @@ from utils.stereo_depth import (
     tensorrt_dtype_to_torch,
 )
 from utils.track_3d_boxes import BoundingBox3DTracker
-from utils.taxonomy import BOXY_SEM2NAME, SSI_COLORS_ALT, TEXT2COLORS, load_text_labels
+from utils.taxonomy import load_text_labels
 from utils.tw.camera import CameraTW
 from utils.tw.obb import BB3D_LINE_ORDERS, ObbTW
 from utils.tw.pose import PoseTW
@@ -113,32 +113,33 @@ def jet_colors_rgb_float(scores):
     return [tuple(float(c) for c in row) for row in rgb]
 
 
+SALIENT_CLASS_RGB = [
+    (0.92, 0.12, 0.16),  # red
+    (0.10, 0.45, 0.98),  # blue
+    (0.05, 0.72, 0.20),  # green
+    (0.98, 0.62, 0.05),  # orange
+    (0.58, 0.20, 0.92),  # purple
+    (0.00, 0.72, 0.78),  # cyan
+    (0.96, 0.10, 0.58),  # magenta
+    (0.68, 0.78, 0.04),  # lime
+    (0.36, 0.22, 0.98),  # indigo
+    (0.98, 0.36, 0.05),  # vermilion
+]
+
+
 def _stable_label_color_rgb(label: str) -> tuple[float, float, float]:
     key = (label or "unknown").strip().lower()
-    if key in TEXT2COLORS:
-        color = TEXT2COLORS[key]
-        return float(color[0]), float(color[1]), float(color[2])
-
-    compact = key.replace(" ", "")
-    for name, color in SSI_COLORS_ALT.items():
-        lowered = name.strip().lower()
-        if lowered == key or lowered.replace(" ", "") == compact:
-            return float(color[0]), float(color[1]), float(color[2])
-
     digest = hashlib.md5(key.encode("utf-8")).digest()
     hue = digest[0] / 255.0
-    sat = 0.68 + 0.20 * (digest[1] / 255.0)
-    val = 0.72 + 0.18 * (digest[2] / 255.0)
+    sat = 0.78 + 0.16 * (digest[1] / 255.0)
+    val = 0.78 + 0.14 * (digest[2] / 255.0)
     r, g, b = colorsys.hsv_to_rgb(float(hue), float(sat), float(val))
     return float(r), float(g), float(b)
 
 
 def obb_class_color_rgb(label: str, sem_id: int) -> tuple[float, float, float]:
-    if sem_id in BOXY_SEM2NAME:
-        sem_name = BOXY_SEM2NAME[sem_id]
-        color = SSI_COLORS_ALT.get(sem_name)
-        if color is not None:
-            return float(color[0]), float(color[1]), float(color[2])
+    if 0 <= int(sem_id) < len(SALIENT_CLASS_RGB):
+        return SALIENT_CLASS_RGB[int(sem_id)]
     return _stable_label_color_rgb(label)
 
 
@@ -1228,6 +1229,7 @@ def run_inference(
     scores3d = torch.zeros(0)
     labels3d: list = []
     bb3_rgb_colors = np.zeros((0, 3), dtype=np.float32)
+    bb3_overlay_rgb_colors = np.zeros((0, 3), dtype=np.float32)
     sdp_patch = None
     sdp_patch_valid = 0
     sdp_patch_median = float("nan")
@@ -1287,6 +1289,9 @@ def run_inference(
             bb3_colors, bb3_rgb_colors = get_obb_color_arrays(
                 labels3d, sem_ids3d, scores3d, bb3_use_class_colors
             )
+            bb3_overlay_colors, bb3_overlay_rgb_colors = get_obb_color_arrays(
+                labels3d, sem_ids3d, scores3d, False
+            )
             obb_pr_w.set_color(torch.from_numpy(bb3_rgb_colors).float())
             bb3_texts = [
                 f"{label[:10]} {float(score):.2f}"
@@ -1303,7 +1308,7 @@ def run_inference(
                     render_obb_corner_steps=6,
                     already_rotated=rotated_bool,
                     rotate_label=rotated_bool,
-                    colors=bb3_colors,
+                    colors=bb3_overlay_colors,
                     texts=bb3_texts,
                     text_sz=0.35,
                     thickness=bb3_line_width,
@@ -1348,6 +1353,7 @@ def run_inference(
         "scores3d": scores3d,
         "labels3d": labels3d,
         "bb3_rgb_colors": bb3_rgb_colors,
+        "bb3_overlay_rgb_colors": bb3_overlay_rgb_colors,
         "bb2d_overlay": bb2d.detach().cpu().numpy().astype(np.float32),
         "bb2_texts": bb2_texts,
         "bb2_rgb_colors": bb2_colors_rgb,
@@ -1470,6 +1476,8 @@ class LiveBoxerViewer(OrbitViewer):
     fs_async: bool = True
     rgb_gpu_overlays: bool = True
     record_fps: float = 5.0
+    ui_capture_path: str = ""
+    ui_capture_frame: int = 3
     fs_debug_stats: bool = False
     follow_mode: bool = False
     follow_back: float = 3.0
@@ -1482,8 +1490,9 @@ class LiveBoxerViewer(OrbitViewer):
     show_rgb_fs_points: bool = False
     show_rgb_fs: bool = False
     show_rgb_owl: bool = True
-    show_rgb_boxer: bool = False
+    show_rgb_boxer: bool = True
     show_rgb_tracker: bool = False
+    split_rgb_overlays: bool = True
     show_raw_by_track_match: bool = True
     show_track_assoc_lines: bool = True
     fs_color_points_by_obb: bool = True
@@ -1494,7 +1503,8 @@ class LiveBoxerViewer(OrbitViewer):
     # Layout
     ui_panel_width = 520
     rgb_panel_width = 960
-    viz_panel_width = 340
+    viz_panel_width = 0
+    prompt_bar_height = 112.0
     frustum_scale = 0.12
     initial_prompts_csv: str = ""
 
@@ -1555,6 +1565,7 @@ class LiveBoxerViewer(OrbitViewer):
         self._loop_timing_overhead_ms = 0.0
         self._fs_update_ms = 0.0
         self._rgb_update_ms = 0.0
+        self._timing_histories: dict[str, list[float]] = {}
         self._total_frame_ms = 0.0
         self._render_only_ms = 0.0
         self._bench_enabled = bool(type(self).bench)
@@ -1574,6 +1585,9 @@ class LiveBoxerViewer(OrbitViewer):
         self._record_frame_idx = 0
         self._record_fps = max(1.0, float(type(self).record_fps))
         self._last_record_mp4: Optional[str] = None
+        self._ui_capture_path = str(type(self).ui_capture_path or "")
+        self._ui_capture_frame = max(1, int(type(self).ui_capture_frame))
+        self._ui_capture_done = False
 
         # GL resources
         self._rgb_texture: Optional[moderngl.Texture] = None
@@ -1688,6 +1702,7 @@ class LiveBoxerViewer(OrbitViewer):
 
         # ImGui-controlled state
         self.thresh2d = float(self.owl.min_confidence)
+        self.owl_nms_iou = float(getattr(self.owl, "nms_iou_threshold", 0.5))
         self.thresh3d = float(self.init_thresh3d)
         self.show_obbs_3d = bool(type(self).show_obbs_3d)
         self.show_frustum = bool(type(self).show_frustum)
@@ -1712,6 +1727,7 @@ class LiveBoxerViewer(OrbitViewer):
         self.show_rgb_owl = bool(type(self).show_rgb_owl)
         self.show_rgb_boxer = bool(type(self).show_rgb_boxer)
         self.show_rgb_tracker = bool(type(self).show_rgb_tracker)
+        self.split_rgb_overlays = bool(type(self).split_rgb_overlays)
         self.show_raw_by_track_match = bool(type(self).show_raw_by_track_match)
         self.show_track_assoc_lines = bool(type(self).show_track_assoc_lines)
         self.fs_use_depth_colormap = bool(type(self).fs_use_depth_colormap)
@@ -1772,9 +1788,7 @@ class LiveBoxerViewer(OrbitViewer):
 
     def _get_3d_viewport_size(self) -> tuple[int, int]:
         w, h = self.wnd.size
-        vw = max(
-            1, int(w - self.ui_panel_width - self.rgb_panel_width - self.viz_panel_width)
-        )
+        vw = max(1, int(w - self.ui_panel_width))
         return vw, h
 
     @staticmethod
@@ -1782,7 +1796,18 @@ class LiveBoxerViewer(OrbitViewer):
         return np.asarray(points, dtype=np.float32)
 
     def _get_3d_viewport_origin_x(self) -> int:
-        return int(self.ui_panel_width + self.viz_panel_width + self.rgb_panel_width)
+        return int(self.ui_panel_width)
+
+    def _is_in_prompt_bar(self, x: float, y: float) -> bool:
+        win_w, win_h = self.wnd.size
+        prompt_h = float(type(self).prompt_bar_height)
+        prompt_x = float(self.ui_panel_width)
+        return prompt_x <= float(x) < float(win_w) and float(y) >= float(win_h) - prompt_h
+
+    def _is_in_3d_viewport(self, x: float, y: float) -> bool:
+        if self._is_in_prompt_bar(x, y):
+            return False
+        return super()._is_in_3d_viewport(x, y)
 
     def _get_orbit_pick_points(self) -> Optional[np.ndarray]:
         pts = []
@@ -1812,8 +1837,8 @@ class LiveBoxerViewer(OrbitViewer):
         min_3d_width = 260
         ui_w = float(np.clip(ui_w, 260, 700))
         rgb_w = float(np.clip(rgb_w, 320, 1500))
-        viz_w = float(np.clip(viz_w, 260, 520))
-        max_total = max(560, win_w - min_3d_width - viz_w)
+        viz_w = 0.0
+        max_total = max(560, win_w - min_3d_width)
         total = ui_w + rgb_w
         if total <= max_total:
             return ui_w, rgb_w, viz_w
@@ -1858,6 +1883,33 @@ class LiveBoxerViewer(OrbitViewer):
     @staticmethod
     def _bench_fmt(parts: dict) -> str:
         return " ".join(f"{k}={float(v):.1f}ms" for k, v in parts.items())
+
+    def _push_timing(self, name: str, value: float) -> None:
+        value = float(value)
+        if not np.isfinite(value):
+            return
+        hist = self._timing_histories.setdefault(name, [])
+        hist.append(value)
+        if len(hist) > 30:
+            del hist[: len(hist) - 30]
+
+    def _timing_mean30(self, name: str, fallback: float = 0.0) -> float:
+        hist = self._timing_histories.get(name)
+        if not hist:
+            return float(fallback)
+        return float(np.mean(hist))
+
+    def _fmt_ms_mean30(self, name: str, value: float, signed: bool = False) -> str:
+        fmt = "+.1f" if signed else ".1f"
+        return f"{float(value):{fmt}} ms (m30 {self._timing_mean30(name, value):.1f} ms)"
+
+    def _fmt_value_mean30(self, name: str, value: float, suffix: str = "") -> str:
+        suffix_part = f" {suffix}" if suffix else ""
+        m30_suffix = suffix_part
+        return (
+            f"{float(value):.1f}{suffix_part} "
+            f"(m30 {self._timing_mean30(name, value):.1f}{m30_suffix})"
+        )
 
     @staticmethod
     def _imgui_ui_busy() -> bool:
@@ -1945,7 +1997,10 @@ class LiveBoxerViewer(OrbitViewer):
         T_world_cam = result["T_wr"].float() @ result["cam"].T_camera_rig.inverse()
         obbs = result["obb_pr_w"]
         scores = result["scores3d"]
-        colors = np.asarray(result.get("bb3_rgb_colors", np.zeros((0, 3))), dtype=np.float32)
+        colors = np.asarray(
+            result.get("bb3_overlay_rgb_colors", np.zeros((0, 3))),
+            dtype=np.float32,
+        )
         if obbs.shape[0] > 0 and scores.numel() > 0:
             self._rgb_overlay_bb3_lines = self._project_obbs_to_rgb_overlay_lines(
                 obbs,
@@ -2064,6 +2119,7 @@ class LiveBoxerViewer(OrbitViewer):
 
         # Update OWL threshold from the slider before running
         self.owl.min_confidence = float(self.thresh2d)
+        self.owl.nms_iou_threshold = float(self.owl_nms_iou)
 
         t_sdp = time.perf_counter()
         boxer_sdp_w = self._get_boxer_sdp_w()
@@ -2091,7 +2147,8 @@ class LiveBoxerViewer(OrbitViewer):
             boxer_sdp_w,
             self.rectify_rgb_for_owl_boxes,
             bench=self._bench_enabled,
-            render_cpu_overlays=not bool(type(self).rgb_gpu_overlays),
+            render_cpu_overlays=bool(self.split_rgb_overlays)
+            or not bool(type(self).rgb_gpu_overlays),
         )
         models_ms = (time.perf_counter() - t_models) * 1000.0
         if result is None:
@@ -2105,6 +2162,10 @@ class LiveBoxerViewer(OrbitViewer):
         result_timings = dict(result.get("timings", {}))
         self._owl_render_ms = float(result_timings.get("owl_render", 0.0))
         self._boxer_render_ms = float(result_timings.get("boxer_render", 0.0))
+        self._push_timing("owl", self._owl_ms)
+        self._push_timing("boxer", self._boxer_ms)
+        self._push_timing("owl_render", self._owl_render_ms)
+        self._push_timing("boxer_render", self._boxer_render_ms)
         self._boxer_sdp_patch_valid = int(result["sdp_patch_valid"])
         self._boxer_sdp_patch_median = float(result["sdp_patch_median"])
         t_convert = time.perf_counter()
@@ -2147,19 +2208,36 @@ class LiveBoxerViewer(OrbitViewer):
                 )
             )
         use_gpu_overlays = bool(type(self).rgb_gpu_overlays)
-        if self.show_rgb_owl and not use_gpu_overlays:
-            panels.append(result["viz_2d_bgr"])
-        if self.show_rgb_boxer and not use_gpu_overlays:
-            panels.append(result["viz_3d_bgr"])
-        if self.show_rgb_tracker and not use_gpu_overlays:
-            panels.append(
-                self._render_tracked_obb_overlay_image(
-                    result["viz_rgb_bgr"],
+        split_rgb_overlays = bool(self.split_rgb_overlays)
+        if split_rgb_overlays:
+            if self.show_rgb_owl:
+                panels.append(result["viz_2d_bgr"])
+            if self.show_rgb_boxer:
+                panels.append(result["viz_3d_bgr"])
+            if self.show_rgb_tracker:
+                panels.append(
+                    self._render_tracked_obb_overlay_image(
+                        result["viz_rgb_bgr"],
+                        result["T_wr"],
+                        result["cam"],
+                        bool(result["rotated0"].item()),
+                    )
+                )
+        elif not use_gpu_overlays:
+            panel = result["viz_rgb_bgr"].copy()
+            if self.show_rgb_owl:
+                panel = result["viz_2d_bgr"].copy()
+            if self.show_rgb_boxer:
+                panel = result["viz_3d_bgr"].copy()
+            if self.show_rgb_tracker:
+                panel = self._render_tracked_obb_overlay_image(
+                    panel,
                     result["T_wr"],
                     result["cam"],
                     bool(result["rotated0"].item()),
                 )
-            )
+            if self.show_rgb_owl or self.show_rgb_boxer or self.show_rgb_tracker:
+                panels.append(panel)
         if not panels:
             panels.append(result["viz_rgb_bgr"])
         panel_render_ms = (time.perf_counter() - t_panels) * 1000.0
@@ -2180,7 +2258,7 @@ class LiveBoxerViewer(OrbitViewer):
         t_upload = time.perf_counter()
         self._upload_rgb_texture(rgb)
         upload_ms = (time.perf_counter() - t_upload) * 1000.0
-        if bool(type(self).rgb_gpu_overlays):
+        if bool(type(self).rgb_gpu_overlays) and not bool(self.split_rgb_overlays):
             self._set_rgb_overlay_data(result)
 
         # Right panel: rebuild 3D line geometry
@@ -2211,6 +2289,10 @@ class LiveBoxerViewer(OrbitViewer):
         self._rgb_timing_actual_ms = infer_total_ms
         self._rgb_timing_gap_ms = infer_total_ms - component_sum_ms
         self._rgb_timing_overhead_ms = rgb_update_overhead_ms
+        self._push_timing("rgb_sum", self._rgb_timing_sum_ms)
+        self._push_timing("rgb_actual", self._rgb_timing_actual_ms)
+        self._push_timing("rgb_gap", self._rgb_timing_gap_ms)
+        self._push_timing("rgb_overhead", self._rgb_timing_overhead_ms)
         prediction_active = bool(self.enable_owl or (self.enable_boxer and self.enable_owl))
         self._prediction_update_ms = infer_total_ms if prediction_active else 0.0
         self._prediction_pending_t0 = infer_t0 if prediction_active else None
@@ -2520,6 +2602,7 @@ class LiveBoxerViewer(OrbitViewer):
             observed_points=observed_points,
         )
         self._tracker_ms = (time.perf_counter() - t0) * 1000.0
+        self._push_timing("tracker", self._tracker_ms)
         self._tracker_frame_idx += 1
         self._n_tracks = len(active_tracks)
         self._latest_raw_track_matches = dict(self.tracker.last_matches)
@@ -3089,6 +3172,7 @@ class LiveBoxerViewer(OrbitViewer):
 
         self._fs_pair_delta_ms = pair_delta_ms
         self._fs_infer_ms = float(infer_ms)
+        self._push_timing("fsp", self._fs_infer_ms)
         depth = disparity_to_depth(disparity, baseline, focal)
         fs_mark("depth")
         self._maybe_print_fs_debug_stats(
@@ -3212,6 +3296,7 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_last_apply_t = fs_apply_t
         if "start_t" in meta:
             self._fs_last_pipeline_ms = (fs_apply_t - float(meta["start_t"])) * 1000.0
+            self._push_timing("fs_pipe", self._fs_last_pipeline_ms)
         if not self._fs_target_inited:
             self._seed_free_orbit_from_follow_view(T_world_rect, T_world_device)
             self._rebuild_world_axes(self.camera_target)
@@ -3466,6 +3551,7 @@ class LiveBoxerViewer(OrbitViewer):
         t_infer = time.time()
         disparity = self._infer_fs_disparity(left_rect, right_rect)
         self._fs_infer_ms = (time.time() - t_infer) * 1000.0
+        self._push_timing("fsp", self._fs_infer_ms)
         fs_mark("infer")
         if disparity is None:
             return
@@ -3594,6 +3680,7 @@ class LiveBoxerViewer(OrbitViewer):
         fs_apply_t = time.perf_counter()
         self._fs_last_apply_t = fs_apply_t
         self._fs_last_pipeline_ms = (fs_apply_t - fs_total_t0) * 1000.0
+        self._push_timing("fs_pipe", self._fs_last_pipeline_ms)
         if not self._fs_target_inited:
             self._seed_free_orbit_from_follow_view(T_world_rect, T_world_device)
             self._rebuild_world_axes(self.camera_target)
@@ -3653,8 +3740,8 @@ class LiveBoxerViewer(OrbitViewer):
             return
         t0 = time.perf_counter()
         win_w, win_h = self.wnd.size
-        x0 = int(round(self.ui_panel_width + self.viz_panel_width))
-        capture_w = int(round(win_w - self.ui_panel_width - self.viz_panel_width))
+        x0 = int(round(self.ui_panel_width))
+        capture_w = int(round(win_w - self.ui_panel_width))
         if capture_w <= 0 or win_h <= 0:
             return
         data = self.ctx.screen.read(viewport=(x0, 0, capture_w, win_h), components=3)
@@ -3665,6 +3752,35 @@ class LiveBoxerViewer(OrbitViewer):
         path = os.path.join(self._record_dir, f"image_{self._record_frame_idx:05d}.png")
         cv2.imwrite(path, img)
         self._record_frame_idx += 1
+        self._render_only_ms = max(
+            0.0, self._render_only_ms - (time.perf_counter() - t0) * 1000.0
+        )
+
+    def _maybe_capture_ui_debug_frame(self) -> None:
+        if (
+            self._ui_capture_done
+            or not self._ui_capture_path
+            or self._render_steps < self._ui_capture_frame
+        ):
+            return
+        t0 = time.perf_counter()
+        win_w, win_h = self.wnd.size
+        if win_w <= 0 or win_h <= 0:
+            return
+        data = self.ctx.screen.read(viewport=(0, 0, win_w, win_h), components=3)
+        img = np.frombuffer(data, dtype=np.uint8).reshape(win_h, win_w, 3)
+        img = np.flipud(img)
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        out_path = os.path.abspath(os.path.expanduser(self._ui_capture_path))
+        out_dir = os.path.dirname(out_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        ok = cv2.imwrite(out_path, img)
+        self._ui_capture_done = True
+        if ok:
+            print(f"[UI_CAPTURE] wrote {out_path} ({win_w}x{win_h})", flush=True)
+        else:
+            print(f"[UI_CAPTURE] failed to write {out_path}", flush=True)
         self._render_only_ms = max(
             0.0, self._render_only_ms - (time.perf_counter() - t0) * 1000.0
         )
@@ -3688,16 +3804,20 @@ class LiveBoxerViewer(OrbitViewer):
         super().on_render(time_val, frame_time)
         self._render_only_ms = (time.perf_counter() - render_t0) * 1000.0
         self._capture_recording_frame()
+        self._maybe_capture_ui_debug_frame()
+        self._push_timing("render", self._render_only_ms)
         if self._prediction_pending_t0 is not None:
             prediction_done_t = time.perf_counter()
             self._prediction_e2e_ms = (
                 prediction_done_t - self._prediction_pending_t0
             ) * 1000.0
+            self._push_timing("pred_latency", self._prediction_e2e_ms)
             self._prediction_pending_t0 = None
             if self._last_prediction_done_t is not None:
                 self._prediction_period_ms = (
                     prediction_done_t - self._last_prediction_done_t
                 ) * 1000.0
+                self._push_timing("pred_period", self._prediction_period_ms)
             self._last_prediction_done_t = prediction_done_t
             self._prediction_count += 1
             pred_now = prediction_done_t
@@ -3728,6 +3848,10 @@ class LiveBoxerViewer(OrbitViewer):
         self._loop_timing_actual_ms = loop_body_ms
         self._loop_timing_gap_ms = loop_body_ms - loop_component_sum_ms
         self._loop_timing_overhead_ms = loop_overhead_ms
+        self._push_timing("loop_sum", self._loop_timing_sum_ms)
+        self._push_timing("loop_actual", self._loop_timing_actual_ms)
+        self._push_timing("loop_gap", self._loop_timing_gap_ms)
+        self._push_timing("loop_overhead", self._loop_timing_overhead_ms)
 
         self._frame_count += 1
         self._bench_loop_idx += 1
@@ -3941,13 +4065,16 @@ class LiveBoxerViewer(OrbitViewer):
         ui_panel_width = float(self._resize_ui_panel_width)
         rgb_panel_width = float(self._resize_rgb_panel_width)
         viz_panel_width = float(self._resize_viz_panel_width)
+        prompt_bar_h = float(type(self).prompt_bar_height)
         splitter_w = 14.0
         splitter_bar_w = 6.0
 
         def render_splitter(name: str, center_x: float, on_drag):
+            nonlocal ui_control_active
             x0 = int(round(center_x - splitter_w * 0.5))
+            splitter_h = max(1, int(round(float(win_h) - prompt_bar_h)))
             imgui.set_next_window_position(x0, 0, imgui.ALWAYS)
-            imgui.set_next_window_size(int(splitter_w), win_h, imgui.ALWAYS)
+            imgui.set_next_window_size(int(splitter_w), splitter_h, imgui.ALWAYS)
             flags = (
                 imgui.WINDOW_NO_MOVE
                 | imgui.WINDOW_NO_RESIZE
@@ -3961,7 +4088,7 @@ class LiveBoxerViewer(OrbitViewer):
             win_pos = imgui.get_window_position()
             imgui.set_cursor_pos((0.0, 0.0))
             imgui.invisible_button(
-                f"##{name}_drag", imgui.ImVec2(float(splitter_w), float(win_h))
+                f"##{name}_drag", imgui.ImVec2(float(splitter_w), float(splitter_h))
             )
             hovered = imgui.is_item_hovered()
             active = imgui.is_item_active()
@@ -3974,7 +4101,7 @@ class LiveBoxerViewer(OrbitViewer):
                 bar_x0,
                 win_pos.y,
                 bar_x1,
-                win_pos.y + win_h,
+                win_pos.y + splitter_h,
                 col,
             )
             if active:
@@ -4004,53 +4131,13 @@ class LiveBoxerViewer(OrbitViewer):
             | imgui.WINDOW_NO_RESIZE
             | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS,
         )
-        rgb_hz = self.state.stream_hz() if self.state is not None else 0.0
-        slam_hz = self.fs_state.stream_hz() if self.fs_state is not None else 0.0
-        imgui.text(f"RGB Hz: {rgb_hz:.1f}")
-        imgui.text(f"SLAM Hz: {slam_hz:.1f}")
-        imgui.text(f"Render FPS: {self._fps:.1f}")
-        imgui.text(
-            f"Pred FPS: {self._prediction_fps:.1f}  period {self._prediction_period_ms:.1f} ms"
-        )
-        imgui.text(
-            f"Pred latency: {self._prediction_e2e_ms:.1f} ms"
-        )
-        imgui.text(f"Render: {self._render_only_ms:.1f} ms")
-        imgui.text(f"FSP: {self._fs_infer_ms:.1f} ms  every {self.fsp_every}")
-        imgui.text(
-            f"FS age: {self._prediction_fs_age_ms:.1f} ms  FS pipe: {self._fs_last_pipeline_ms:.1f} ms"
-        )
-        imgui.text(f"OWL: {self._owl_ms:.1f} ms  render {self._owl_render_ms:.1f} ms")
-        imgui.text(
-            f"Boxer: {self._boxer_ms:.1f} ms  render {self._boxer_render_ms:.1f} ms"
-        )
-        imgui.text(f"Tracker: {self._tracker_ms:.1f} ms")
-        imgui.text(
-            f"RGB SUM: {self._rgb_timing_sum_ms:.1f} ms  ACTUAL: {self._rgb_timing_actual_ms:.1f} ms"
-        )
-        imgui.text(
-            f"RGB gap: {self._rgb_timing_gap_ms:+.1f} ms  overhead {self._rgb_timing_overhead_ms:.1f} ms"
-        )
-        imgui.text(
-            f"LOOP SUM: {self._loop_timing_sum_ms:.1f} ms  ACTUAL: {self._loop_timing_actual_ms:.1f} ms"
-        )
-        imgui.text(
-            f"LOOP gap: {self._loop_timing_gap_ms:+.1f} ms  overhead {self._loop_timing_overhead_ms:.1f} ms"
-        )
-        imgui.text(f"2D detections: {self._n_2d}")
-        imgui.text(f"3D detections: {self._n_3d}")
-        imgui.text(f"Tracked 3DBBs: {self._n_tracks}")
-        imgui.text(f"Track matches: {self._n_track_matches}")
-        boxer_sdp_count = (
-            0
-            if self._fs_boxer_pts_world is None
-            else min(len(self._fs_boxer_pts_world), int(self.fs_boxer_max_points))
-        )
-        imgui.text(f"Boxer SDP pts: {boxer_sdp_count}")
-        imgui.text(
-            f"Boxer SDP patches: {self._boxer_sdp_patch_valid}  median depth: {self._boxer_sdp_patch_median:.3f} m"
-        )
-        imgui.separator()
+        def ui_section(label: str, default_open: bool = False) -> bool:
+            flags = int(imgui.TreeNodeFlags_.default_open) if default_open else 0
+            result = imgui.collapsing_header(label, flags=flags)
+            if isinstance(result, tuple):
+                return bool(result[0])
+            return bool(result)
+
         label_w = max(110.0, min(180.0, ui_panel_width * 0.42))
         slider_w = max(110.0, float(ui_panel_width) - label_w - 36.0)
 
@@ -4078,6 +4165,82 @@ class LiveBoxerViewer(OrbitViewer):
             imgui.pop_item_width()
             return changed, value
 
+        if ui_section("Default", default_open=True):
+            _, self.thresh2d = labeled_slider_float(
+                "2D thr", self.thresh2d, 0.0, 1.0
+            )
+            _, self.thresh3d = labeled_slider_float(
+                "3D thr", self.thresh3d, 0.0, 1.0
+            )
+            rgb_hz = self.state.stream_hz() if self.state is not None else 0.0
+            slam_hz = self.fs_state.stream_hz() if self.fs_state is not None else 0.0
+            self._push_timing("rgb_hz", rgb_hz)
+            self._push_timing("slam_hz", slam_hz)
+            self._push_timing("pred_fps", self._prediction_fps)
+            imgui.text(f"RGB Hz: {self._fmt_value_mean30('rgb_hz', rgb_hz)}")
+            imgui.text(f"SLAM Hz: {self._fmt_value_mean30('slam_hz', slam_hz)}")
+            imgui.text(
+                f"Pred FPS: {self._fmt_value_mean30('pred_fps', self._prediction_fps)}"
+            )
+            imgui.text(
+                f"Pred latency: {self._fmt_ms_mean30('pred_latency', self._prediction_e2e_ms)}"
+            )
+            imgui.text(
+                f"FSP: {self._fmt_ms_mean30('fsp', self._fs_infer_ms)}  every {self.fsp_every}"
+            )
+            imgui.text(f"OWL: {self._fmt_ms_mean30('owl', self._owl_ms)}")
+            imgui.text(f"Boxer: {self._fmt_ms_mean30('boxer', self._boxer_ms)}")
+            imgui.text(f"Tracker: {self._fmt_ms_mean30('tracker', self._tracker_ms)}")
+            imgui.text(f"Render: {self._fmt_ms_mean30('render', self._render_only_ms)}")
+
+        if ui_section("Advanced Timing"):
+            self._push_timing("render_fps", self._fps)
+            self._push_timing("fs_age", self._prediction_fs_age_ms)
+            imgui.text(f"Render FPS: {self._fmt_value_mean30('render_fps', self._fps)}")
+            imgui.text(
+                f"Pred period: {self._fmt_ms_mean30('pred_period', self._prediction_period_ms)}"
+            )
+            imgui.text(
+                f"FS age: {self._fmt_ms_mean30('fs_age', self._prediction_fs_age_ms)}"
+            )
+            imgui.text(
+                f"FS pipe: {self._fmt_ms_mean30('fs_pipe', self._fs_last_pipeline_ms)}"
+            )
+            imgui.text(
+                f"OWL render: {self._fmt_ms_mean30('owl_render', self._owl_render_ms)}"
+            )
+            imgui.text(
+                f"Boxer render: {self._fmt_ms_mean30('boxer_render', self._boxer_render_ms)}"
+            )
+            imgui.text(
+                f"RGB SUM: {self._fmt_ms_mean30('rgb_sum', self._rgb_timing_sum_ms)}  "
+                f"ACTUAL: {self._fmt_ms_mean30('rgb_actual', self._rgb_timing_actual_ms)}"
+            )
+            imgui.text(
+                f"RGB gap: {self._fmt_ms_mean30('rgb_gap', self._rgb_timing_gap_ms, signed=True)}  "
+                f"overhead {self._fmt_ms_mean30('rgb_overhead', self._rgb_timing_overhead_ms)}"
+            )
+            imgui.text(
+                f"LOOP SUM: {self._fmt_ms_mean30('loop_sum', self._loop_timing_sum_ms)}  "
+                f"ACTUAL: {self._fmt_ms_mean30('loop_actual', self._loop_timing_actual_ms)}"
+            )
+            imgui.text(
+                f"LOOP gap: {self._fmt_ms_mean30('loop_gap', self._loop_timing_gap_ms, signed=True)}  "
+                f"overhead {self._fmt_ms_mean30('loop_overhead', self._loop_timing_overhead_ms)}"
+            )
+            imgui.text(f"2D detections: {self._n_2d}")
+            imgui.text(f"3D detections: {self._n_3d}")
+            imgui.text(f"Tracked 3DBBs: {self._n_tracks}")
+            imgui.text(f"Track matches: {self._n_track_matches}")
+            boxer_sdp_count = (
+                0
+                if self._fs_boxer_pts_world is None
+                else min(len(self._fs_boxer_pts_world), int(self.fs_boxer_max_points))
+            )
+            imgui.text(f"Boxer SDP pts: {boxer_sdp_count}")
+            imgui.text(
+                f"Boxer SDP patches: {self._boxer_sdp_patch_valid}  median depth: {self._boxer_sdp_patch_median:.3f} m"
+            )
         def ui_checkbox(label, value):
             nonlocal ui_control_active
             changed, value = imgui.checkbox(label, value)
@@ -4096,120 +4259,87 @@ class LiveBoxerViewer(OrbitViewer):
             ui_control_active = ui_control_active or bool(changed) or imgui.is_item_active()
             return changed, value
 
-        def ui_input_text_multiline(label, value, width, height):
+        def ui_input_text_multiline(label, value, width, height, flags=0):
             nonlocal ui_control_active
-            changed, value = imgui.input_text_multiline(label, value, width, height)
+            changed, value = imgui.input_text_multiline(
+                label, value, width, height, flags
+            )
             ui_control_active = ui_control_active or bool(changed) or imgui.is_item_active()
             return changed, value
 
-        if self._recording:
-            if ui_button("Stop video"):
-                self._stop_recording()
-            imgui.same_line()
-            imgui.text(f"{self._record_frame_idx} frames")
-        else:
-            if ui_button("Record video"):
-                self._start_recording()
-            if self._last_record_mp4:
-                imgui.text(f"Saved: {os.path.basename(self._last_record_mp4)}")
-        imgui.text(f"Record FPS: {self._record_fps:.0f}")
-        imgui.separator()
+        if ui_section("Enable", default_open=True):
+            if self.fs_state is not None:
+                _, self.enable_foundation_stereo = ui_checkbox(
+                    "Enable FS", self.enable_foundation_stereo
+                )
+            _, self.enable_owl = ui_checkbox("Enable OWL", self.enable_owl)
+            boxer_enabled = self.enable_boxer
+            _, boxer_enabled = ui_checkbox("Enable Boxer", boxer_enabled)
+            self.enable_boxer = boxer_enabled and self.enable_owl
+            if not self.enable_owl:
+                imgui.text("Boxer requires OWL proposals")
+            tracker_enabled = self.enable_tracker
+            _, tracker_enabled = ui_checkbox("Enable Tracker", tracker_enabled)
+            self.enable_tracker = tracker_enabled and self.enable_boxer and self.enable_owl
+            if tracker_enabled and not self.enable_boxer:
+                imgui.text("Tracker requires Boxer 3DBBs")
+            if ui_button("Reset tracker"):
+                self._reset_tracker_state()
 
-        _, self._resize_ui_panel_width = labeled_slider_float(
-            "UI W", self._resize_ui_panel_width, 260, 700, "%.0f"
-        )
-        _, self._resize_rgb_panel_width = labeled_slider_float(
-            "RGB W", self._resize_rgb_panel_width, 320, 1500, "%.0f"
-        )
-        _, self._resize_viz_panel_width = labeled_slider_float(
-            "3D UI W", self._resize_viz_panel_width, 260, 520, "%.0f"
-        )
-        imgui.separator()
-        _, self.thresh2d = labeled_slider_float(
-            "2D thr", self.thresh2d, 0.0, 1.0
-        )
-        _, self.thresh3d = labeled_slider_float(
-            "3D thr", self.thresh3d, 0.0, 1.0
-        )
-        _, self.bb2_line_width = labeled_slider_int(
-            "2D lw", self.bb2_line_width, 1, 12
-        )
-        _, self.bb3_image_line_width = labeled_slider_int(
-            "3D img lw", self.bb3_image_line_width, 1, 12
-        )
-        imgui.separator()
-        if self.fs_state is not None:
-            _, self.enable_foundation_stereo = ui_checkbox(
-                "Enable FS", self.enable_foundation_stereo
+        if ui_section("Detection"):
+            _, self.owl_nms_iou = labeled_slider_float(
+                "2D NMS", self.owl_nms_iou, 0.05, 1.0
             )
-        _, self.enable_owl = ui_checkbox("Enable OWL", self.enable_owl)
-        boxer_enabled = self.enable_boxer
-        _, boxer_enabled = ui_checkbox("Enable Boxer", boxer_enabled)
-        self.enable_boxer = boxer_enabled and self.enable_owl
-        if not self.enable_owl:
-            imgui.text("Boxer requires OWL proposals")
-        tracker_enabled = self.enable_tracker
-        _, tracker_enabled = ui_checkbox("Enable Tracker", tracker_enabled)
-        self.enable_tracker = tracker_enabled and self.enable_boxer and self.enable_owl
-        if tracker_enabled and not self.enable_boxer:
-            imgui.text("Tracker requires Boxer 3DBBs")
-        if ui_button("Reset tracker"):
-            self._reset_tracker_state()
-        _, self.use_fs_for_boxer_sdp = ui_checkbox(
-            "Use FS points for Boxer SDP", self.use_fs_for_boxer_sdp
-        )
-        _, self.rectify_rgb_for_owl_boxes = ui_checkbox(
-            "Rectify RGB for OWL", self.rectify_rgb_for_owl_boxes
-        )
-        _, self.bb3_use_class_colors = ui_checkbox(
-            "3DBB class/prompt colors", self.bb3_use_class_colors
-        )
-        imgui.separator()
-        imgui.text("Prompts")
-        prompt_w = max(150.0, float(ui_panel_width) - 24.0)
-        prompt_h = max(48.0, imgui.get_text_line_height_with_spacing() * 2.4)
-        _, self.prompt_editor_text = ui_input_text_multiline(
-            "##live_prompts_csv",
-            self.prompt_editor_text,
-            prompt_w,
-            prompt_h,
-        )
-        if ui_button("Apply prompts"):
-            self._apply_prompt_editor()
-        imgui.same_line()
-        if ui_button("Clear prompts"):
-            self.prompt_editor_text = ""
-            self._apply_prompt_editor()
-        imgui.text(f"{len(self.text_labels)} active")
-        imgui.end()
+            _, self.use_fs_for_boxer_sdp = ui_checkbox(
+                "Use FS points for Boxer SDP", self.use_fs_for_boxer_sdp
+            )
+            _, self.rectify_rgb_for_owl_boxes = ui_checkbox(
+                "Rectify RGB for OWL", self.rectify_rgb_for_owl_boxes
+            )
+            _, self.bb3_use_class_colors = ui_checkbox(
+                "3DBB class/prompt colors", self.bb3_use_class_colors
+            )
 
-        # Left: 3D viz panel
-        viz_x = int(ui_panel_width)
-        imgui.set_next_window_position(viz_x, 0, imgui.ALWAYS)
-        imgui.set_next_window_size(int(viz_panel_width), win_h, imgui.ALWAYS)
-        imgui.begin(
-            "3D Viz",
-            flags=imgui.WINDOW_NO_MOVE
-            | imgui.WINDOW_NO_RESIZE
-            | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS,
-        )
-        _, self.show_obbs_3d = ui_checkbox("Show 3D OBBs", self.show_obbs_3d)
-        _, self.show_raw_by_track_match = ui_checkbox(
-            "Raw->track color", self.show_raw_by_track_match
-        )
-        _, self.show_track_assoc_lines = ui_checkbox(
-            "Track assoc lines", self.show_track_assoc_lines
-        )
-        _, self.line_width = labeled_slider_float(
-            "3D OBB lw", self.line_width, 1.0, 10.0
-        )
-        _, self.tracker_line_width = labeled_slider_float(
-            "Track lw", self.tracker_line_width, 2.0, 16.0
-        )
-        _, self.show_frustum = ui_checkbox("Show frustum", self.show_frustum)
-        _, self.show_world_axes = ui_checkbox("Show axes", self.show_world_axes)
-        if self.fs_state is not None:
-            imgui.separator()
+        if ui_section("RGB Overlays"):
+            _, self.show_rgb_fs_points = ui_checkbox(
+                "Show FS Points", self.show_rgb_fs_points
+            )
+            _, self.show_rgb_fs = ui_checkbox("Show FS SDP", self.show_rgb_fs)
+            _, self.show_rgb_owl = ui_checkbox("Show OWL", self.show_rgb_owl)
+            _, self.show_rgb_boxer = ui_checkbox(
+                "Show Boxer 3DBB", self.show_rgb_boxer
+            )
+            _, self.show_rgb_tracker = ui_checkbox(
+                "Show Tracked 3DBB", self.show_rgb_tracker
+            )
+            _, self.split_rgb_overlays = ui_checkbox(
+                "Separate RGB copies", self.split_rgb_overlays
+            )
+            _, self.bb2_line_width = labeled_slider_int(
+                "2D lw", self.bb2_line_width, 1, 12
+            )
+            _, self.bb3_image_line_width = labeled_slider_int(
+                "3D img lw", self.bb3_image_line_width, 1, 12
+            )
+
+        if ui_section("3D View"):
+            _, self.show_obbs_3d = ui_checkbox("Show 3D OBBs", self.show_obbs_3d)
+            _, self.show_raw_by_track_match = ui_checkbox(
+                "Raw->track color", self.show_raw_by_track_match
+            )
+            _, self.show_track_assoc_lines = ui_checkbox(
+                "Track assoc lines", self.show_track_assoc_lines
+            )
+            _, self.line_width = labeled_slider_float(
+                "3D OBB lw", self.line_width, 1.0, 10.0
+            )
+            _, self.tracker_line_width = labeled_slider_float(
+                "Track lw", self.tracker_line_width, 2.0, 16.0
+            )
+            _, self.show_frustum = ui_checkbox("Show frustum", self.show_frustum)
+            _, self.show_world_axes = ui_checkbox("Show axes", self.show_world_axes)
+
+        if self.fs_state is not None and ui_section("FoundationStereo"):
             _, self.show_fs_points = ui_checkbox("Show FS pts", self.show_fs_points)
             _, self.fs_use_depth_colormap = ui_checkbox(
                 "FS jet colors", self.fs_use_depth_colormap
@@ -4244,12 +4374,33 @@ class LiveBoxerViewer(OrbitViewer):
             _, self.follow_smoothing = labeled_slider_float(
                 "F smooth", self.follow_smoothing, 0.0, 1.0
             )
+
+        if ui_section("Layout"):
+            _, self._resize_ui_panel_width = labeled_slider_float(
+                "UI W", self._resize_ui_panel_width, 260, 700, "%.0f"
+            )
+            _, self._resize_rgb_panel_width = labeled_slider_float(
+                "RGB W", self._resize_rgb_panel_width, 320, 1500, "%.0f"
+            )
+
+        if ui_section("Recording"):
+            if self._recording:
+                if ui_button("Stop video"):
+                    self._stop_recording()
+                imgui.same_line()
+                imgui.text(f"{self._record_frame_idx} frames")
+            else:
+                if ui_button("Record video"):
+                    self._start_recording()
+                if self._last_record_mp4:
+                    imgui.text(f"Saved: {os.path.basename(self._last_record_mp4)}")
+            imgui.text(f"Record FPS: {self._record_fps:.0f}")
         imgui.end()
 
         # Center-left: RGB + 2DBB overlay panel
         if self._rgb_texture is not None:
             tex_w, tex_h = self._rgb_tex_size
-            rgb_x = int(ui_panel_width + viz_panel_width)
+            rgb_x = int(ui_panel_width)
             imgui.set_next_window_position(rgb_x, 0, imgui.ALWAYS)
             imgui.set_next_window_size(int(rgb_panel_width), win_h, imgui.ALWAYS)
             expanded, _ = imgui.begin(
@@ -4259,48 +4410,86 @@ class LiveBoxerViewer(OrbitViewer):
                 | imgui.WINDOW_NO_BRING_TO_FRONT_ON_FOCUS,
             )
             if expanded:
-                _, self.show_rgb_fs_points = ui_checkbox(
-                    "Show FS Points", self.show_rgb_fs_points
-                )
-                _, self.show_rgb_fs = ui_checkbox("Show FS SDP", self.show_rgb_fs)
-                _, self.show_rgb_owl = ui_checkbox("Show OWL", self.show_rgb_owl)
-                _, self.show_rgb_boxer = ui_checkbox(
-                    "Show Boxer 3DBB", self.show_rgb_boxer
-                )
-                _, self.show_rgb_tracker = ui_checkbox(
-                    "Show Tracked 3DBB", self.show_rgb_tracker
-                )
-                imgui.separator()
                 avail_w, avail_h = imgui.get_content_region_available()
                 scale = min(avail_w / tex_w, avail_h / tex_h)
                 imgui.image(
                     self._rgb_texture.glo, tex_w * scale, tex_h * scale
                 )
-                if bool(type(self).rgb_gpu_overlays):
+                if bool(type(self).rgb_gpu_overlays) and not bool(self.split_rgb_overlays):
                     img_min = imgui.get_item_rect_min()
                     draw_list = imgui.get_window_draw_list()
                     self._draw_rgb_gpu_overlays(
                         draw_list, img_min, tex_w * scale, tex_h * scale
-                    )
+            )
             imgui.end()
 
+        prompt_bar_x = int(ui_panel_width)
+        prompt_bar_w = max(1, int(win_w - prompt_bar_x))
+        imgui.set_next_window_position(
+            prompt_bar_x, int(max(0.0, win_h - prompt_bar_h)), imgui.ALWAYS
+        )
+        imgui.set_next_window_size(prompt_bar_w, int(prompt_bar_h), imgui.ALWAYS)
+        imgui.begin(
+            "Prompt Bar",
+            flags=imgui.WINDOW_NO_MOVE
+            | imgui.WINDOW_NO_RESIZE
+            | imgui.WINDOW_NO_TITLE_BAR,
+        )
+        prompt_font_size = max(18.0, min(22.0, imgui.get_font_size() * 1.18))
+        imgui.push_font(None, prompt_font_size)
+        avail_w, avail_h = imgui.get_content_region_available()
+        prompt_h = min(
+            max(46.0, imgui.get_text_line_height_with_spacing() * 1.55),
+            max(38.0, float(avail_h) - 18.0),
+        )
+        label_col_w = 216.0
+        button_w = 126.0
+        button_gap = 10.0
+        status_text = f"{len(self.text_labels)} active"
+        status_w = max(150.0, float(imgui.calc_text_size(status_text).x) + 28.0)
+        controls_w = (button_w * 2.0) + (button_gap * 3.0) + status_w + 24.0
+        prompt_w = max(160.0, float(avail_w) - label_col_w - controls_w)
+        imgui.text("Queries")
+        imgui.same_line(label_col_w)
+        prompt_submitted, self.prompt_editor_text = ui_input_text_multiline(
+            "##live_prompts_bottom",
+            self.prompt_editor_text,
+            prompt_w,
+            prompt_h,
+            imgui.INPUT_TEXT_ENTER_RETURNS_TRUE
+            | imgui.INPUT_TEXT_CTRL_ENTER_FOR_NEW_LINE,
+        )
+        prompt_active = imgui.is_item_active()
+        prompt_enter_pressed = prompt_active and (
+            imgui.is_key_pressed(imgui.Key.enter, False)
+            or imgui.is_key_pressed(imgui.Key.keypad_enter, False)
+        )
+        imgui.same_line(0.0, button_gap)
+        apply_clicked = imgui.button("Apply", button_w, prompt_h)
+        ui_control_active = ui_control_active or bool(apply_clicked) or imgui.is_item_active()
+        if apply_clicked or prompt_submitted or prompt_enter_pressed:
+            self._apply_prompt_editor()
+        imgui.same_line(0.0, button_gap)
+        clear_clicked = imgui.button("Clear", button_w, prompt_h)
+        ui_control_active = ui_control_active or bool(clear_clicked) or imgui.is_item_active()
+        if clear_clicked:
+            self.prompt_editor_text = ""
+            self._apply_prompt_editor()
+        imgui.same_line(0.0, button_gap)
+        imgui.text(status_text)
+        imgui.pop_font()
+        imgui.end()
+
         render_splitter(
-            "##splitter_ui_viz",
+            "##splitter_ui_rgb",
             float(ui_panel_width),
             lambda dx: setattr(
                 self, "_resize_ui_panel_width", float(self._resize_ui_panel_width) + dx
             ),
         )
         render_splitter(
-            "##splitter_viz_rgb",
-            float(ui_panel_width + viz_panel_width),
-            lambda dx: setattr(
-                self, "_resize_viz_panel_width", float(self._resize_viz_panel_width) + dx
-            ),
-        )
-        render_splitter(
             "##splitter_rgb_3d",
-            float(ui_panel_width + viz_panel_width + rgb_panel_width),
+            float(ui_panel_width + rgb_panel_width),
             lambda dx: setattr(
                 self, "_resize_rgb_panel_width", float(self._resize_rgb_panel_width) + dx
             ),
@@ -4939,6 +5128,23 @@ def parse_args():
         help="FPS used when encoding UI video recordings.",
     )
     p.add_argument(
+        "--ui_capture",
+        type=str,
+        default="",
+        help="Write a one-shot full-window UI screenshot PNG to this path.",
+    )
+    p.add_argument(
+        "--ui_capture_frame",
+        type=int,
+        default=3,
+        help="Render frame index for --ui_capture after the viewer opens.",
+    )
+    p.add_argument(
+        "--ui_capture_mock",
+        action="store_true",
+        help="Open a UI-only mock viewer for --ui_capture without connecting to Aria.",
+    )
+    p.add_argument(
         "--rectify",
         action="store_true",
         help="Rectify RGB fisheye to pinhole before OWL, then map 2D boxes back to fisheye before Boxer.",
@@ -5028,7 +5234,7 @@ def parse_args():
         "--fsm",
         "--fs_model",
         type=str,
-        default=None,
+        default="f256",
         choices=sorted(FS_MODEL_PRESETS),
         help=fs_preset_help,
     )
@@ -5071,6 +5277,62 @@ def pick_device(force_cpu: bool) -> str:
 
 def main():
     args = parse_args()
+    if bool(args.ui_capture_mock):
+        labels_list = [s for s in args.labels.split(",") if s]
+        text_labels = load_text_labels(labels_list)
+
+        class _NoopLock:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class _MockState:
+            lock = _NoopLock()
+            frame = None
+
+            @staticmethod
+            def stream_hz() -> float:
+                return 0.0
+
+        class _MockOwl:
+            min_confidence = float(args.thresh2d)
+            nms_iou_threshold = 0.5
+
+            def set_text_prompts(self, prompts):
+                self.text_prompts = list(prompts)
+
+        sem_name_to_id = {label: i for i, label in enumerate(text_labels)}
+        LiveBoxerViewer.state = _MockState()
+        LiveBoxerViewer.owl = _MockOwl()
+        LiveBoxerViewer.boxernet = None
+        LiveBoxerViewer.text_labels = text_labels
+        LiveBoxerViewer.sem_name_to_id = sem_name_to_id
+        LiveBoxerViewer.sem_id_to_name = {v: k for k, v in sem_name_to_id.items()}
+        LiveBoxerViewer.initial_prompts_csv = ",".join(text_labels)
+        LiveBoxerViewer.HW = int(args.image_hw) if args.image_hw is not None else 960
+        LiveBoxerViewer.detector_hw = int(args.detector_hw)
+        LiveBoxerViewer.init_thresh3d = float(args.thresh3d)
+        LiveBoxerViewer.dev = "cpu"
+        LiveBoxerViewer.pdtype = torch.float32
+        LiveBoxerViewer.max_steps = int(args.max_steps) if args.max_steps > 0 else 8
+        LiveBoxerViewer.bench = bool(args.bench)
+        LiveBoxerViewer.bench_every = int(args.bench_every)
+        LiveBoxerViewer.fs_async = False
+        LiveBoxerViewer.rgb_gpu_overlays = not bool(args.cpu_rgb_overlays)
+        LiveBoxerViewer.record_fps = float(args.record_fps)
+        LiveBoxerViewer.ui_capture_path = str(args.ui_capture or "")
+        LiveBoxerViewer.ui_capture_frame = int(args.ui_capture_frame)
+        LiveBoxerViewer.fs_state = None
+        LiveBoxerViewer.enable_foundation_stereo = False
+        LiveBoxerViewer.enable_owl = False
+        LiveBoxerViewer.enable_boxer = False
+        LiveBoxerViewer.enable_tracker = False
+        print("==> Launching UI capture mock viewer.", flush=True)
+        launch_viewer(LiveBoxerViewer)
+        return
+
     ensure_aria_tools_on_path()
 
     selected_components = bool(args.fs or args.owl or args.boxer or args.tracker)
@@ -5305,6 +5567,8 @@ def main():
         LiveBoxerViewer.fs_async = not bool(args.no_fs_async)
         LiveBoxerViewer.rgb_gpu_overlays = not bool(args.cpu_rgb_overlays)
         LiveBoxerViewer.record_fps = float(args.record_fps)
+        LiveBoxerViewer.ui_capture_path = str(args.ui_capture or "")
+        LiveBoxerViewer.ui_capture_frame = int(args.ui_capture_frame)
         LiveBoxerViewer.fs_state = fs_state
         LiveBoxerViewer.fs_ckpt = args.fs_ckpt
         LiveBoxerViewer.fs_impl = args.fs_impl
