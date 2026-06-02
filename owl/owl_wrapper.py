@@ -190,7 +190,7 @@ class OwlWrapper(nn.Module):
         min_confidence=0.2,
         precision="float32",
         warmup=True,
-        nms_iou_threshold=0.5,
+        nms_iou_threshold=0.1,
         max_candidates=None,
     ):
         super().__init__()

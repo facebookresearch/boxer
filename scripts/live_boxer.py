@@ -12,6 +12,7 @@ Press 'q' or Esc to quit. Right-drag to orbit, left-drag to pan, scroll to zoom.
 import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
 import colorsys
+import glob
 import hashlib
 import os
 import platform
@@ -168,6 +169,24 @@ def get_obb_color_arrays(
         for row in rgb
     ]
     return bgr, rgb.astype(np.float32)
+
+
+def discover_boxernet_checkpoints(current_path: str = "") -> list[str]:
+    pattern = os.path.join(CKPT_PATH, "boxernet_*")
+    paths = sorted(
+        p
+        for p in glob.glob(pattern)
+        if os.path.isfile(p) and os.path.basename(p).startswith("boxernet_")
+    )
+    if current_path:
+        current_abs = os.path.abspath(os.path.expanduser(current_path))
+        if os.path.exists(current_abs) and current_abs not in paths:
+            paths.insert(0, current_abs)
+    return paths
+
+
+def _short_ckpt_name(path: str) -> str:
+    return os.path.basename(path.rstrip(os.sep)) or path
 
 
 class FoundationStereoRuntime:
@@ -1439,6 +1458,7 @@ class LiveBoxerViewer(OrbitViewer):
     text_labels: list = None
     sem_name_to_id: dict = None
     sem_id_to_name: dict = None
+    boxernet_ckpt: str = ""
     HW: int = 960
     detector_hw: int = 960
     init_thresh3d: float = 0.5
@@ -1690,6 +1710,20 @@ class LiveBoxerViewer(OrbitViewer):
         self._resize_rgb_panel_width = float(type(self).rgb_panel_width)
         self._resize_viz_panel_width = float(type(self).viz_panel_width)
         self.prompt_editor_text = str(type(self).initial_prompts_csv)
+        self.boxernet_ckpts = discover_boxernet_checkpoints(str(type(self).boxernet_ckpt))
+        self.current_boxernet_ckpt = str(type(self).boxernet_ckpt or "")
+        if not self.current_boxernet_ckpt and self.boxernet_ckpts:
+            self.current_boxernet_ckpt = self.boxernet_ckpts[0]
+        current_abs = os.path.abspath(os.path.expanduser(self.current_boxernet_ckpt))
+        ckpt_abs = [
+            os.path.abspath(os.path.expanduser(path)) for path in self.boxernet_ckpts
+        ]
+        self.boxernet_ckpt_index = ckpt_abs.index(current_abs) if current_abs in ckpt_abs else 0
+        self._boxernet_load_status = (
+            f"Loaded: {_short_ckpt_name(self.current_boxernet_ckpt)}"
+            if self.current_boxernet_ckpt
+            else "No BoxerNet checkpoint found"
+        )
         self.tracker = BoundingBox3DTracker(
             iou_threshold=0.25,
             min_hits=3,
@@ -1767,6 +1801,39 @@ class LiveBoxerViewer(OrbitViewer):
         self._n_track_matches = 0
         self._rebuild_tracked_obb_lines(
             self._latest_tracked_obbs_3d, self._latest_tracked_scores_3d
+        )
+
+    def _reload_boxernet_checkpoint(self, ckpt_path: str) -> None:
+        ckpt_path = os.path.abspath(os.path.expanduser(str(ckpt_path)))
+        if not os.path.exists(ckpt_path):
+            self._boxernet_load_status = f"Missing: {_short_ckpt_name(ckpt_path)}"
+            print(f"==> BoxerNet checkpoint missing: {ckpt_path}", flush=True)
+            return
+        print(f"==> Loading BoxerNet checkpoint: {ckpt_path}", flush=True)
+        old_boxernet = self.boxernet
+        self.boxernet = None
+        if self.dev == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        try:
+            new_boxernet = BoxerNet.load_from_checkpoint(ckpt_path, device=self.dev)
+        except Exception as err:
+            self.boxernet = old_boxernet
+            self._boxernet_load_status = (
+                f"Load failed: {_short_ckpt_name(ckpt_path)} ({err})"
+            )
+            print(f"==> BoxerNet checkpoint load failed: {err}", flush=True)
+            return
+        self.boxernet = new_boxernet
+        self.current_boxernet_ckpt = ckpt_path
+        self.HW = int(new_boxernet.hw)
+        self._last_ts = -1
+        self._reset_tracker_state()
+        self._boxernet_load_status = (
+            f"Loaded: {_short_ckpt_name(ckpt_path)}  hw={int(new_boxernet.hw)}"
+        )
+        print(
+            f"==> BoxerNet checkpoint active: {ckpt_path} (hw={int(new_boxernet.hw)})",
+            flush=True,
         )
 
     def _apply_prompt_editor(self) -> None:
@@ -4183,7 +4250,7 @@ class LiveBoxerViewer(OrbitViewer):
                 f"Pred FPS: {self._fmt_value_mean30('pred_fps', self._prediction_fps)}"
             )
             imgui.text(
-                f"Pred latency: {self._fmt_ms_mean30('pred_latency', self._prediction_e2e_ms)}"
+                f"Total: {self._fmt_ms_mean30('pred_latency', self._prediction_e2e_ms)}"
             )
             imgui.text(
                 f"FSP: {self._fmt_ms_mean30('fsp', self._fs_infer_ms)}  every {self.fsp_every}"
@@ -4299,6 +4366,34 @@ class LiveBoxerViewer(OrbitViewer):
             _, self.bb3_use_class_colors = ui_checkbox(
                 "3DBB class/prompt colors", self.bb3_use_class_colors
             )
+
+        if ui_section("Boxer Model Picker"):
+            if ui_button("Refresh models"):
+                self.boxernet_ckpts = discover_boxernet_checkpoints(
+                    self.current_boxernet_ckpt
+                )
+                self.boxernet_ckpt_index = min(
+                    self.boxernet_ckpt_index, max(0, len(self.boxernet_ckpts) - 1)
+                )
+            if self.boxernet_ckpts:
+                names = [_short_ckpt_name(path) for path in self.boxernet_ckpts]
+                imgui.push_item_width(max(160.0, float(ui_panel_width) - 36.0))
+                changed, self.boxernet_ckpt_index = imgui.combo(
+                    "##boxernet_ckpt_picker",
+                    int(self.boxernet_ckpt_index),
+                    names,
+                )
+                ui_control_active = (
+                    ui_control_active or bool(changed) or imgui.is_item_active()
+                )
+                imgui.pop_item_width()
+                selected_ckpt = self.boxernet_ckpts[int(self.boxernet_ckpt_index)]
+                imgui.text(_short_ckpt_name(selected_ckpt))
+                if ui_button("Apply Boxer model"):
+                    self._reload_boxernet_checkpoint(selected_ckpt)
+            else:
+                imgui.text("No ckpts/boxernet_* files found")
+            imgui.text(self._boxernet_load_status)
 
         if ui_section("RGB Overlays"):
             _, self.show_rgb_fs_points = ui_checkbox(
@@ -5275,6 +5370,40 @@ def pick_device(force_cpu: bool) -> str:
     return "cpu"
 
 
+def start_streaming_with_session_recovery(device_client, device) -> None:
+    try:
+        device.start_streaming()
+        return
+    except RuntimeError as err:
+        message = str(err)
+        if "User session already started" not in message:
+            raise
+
+        print(
+            "==> Existing Aria streaming session detected; sending stop_streaming and retrying once...",
+            flush=True,
+        )
+        try:
+            device.stop_streaming()
+            time.sleep(1.0)
+        except Exception as stop_err:
+            print(f"==> stop_streaming during recovery failed: {stop_err}", flush=True)
+
+        try:
+            device.start_streaming()
+            print("==> Recovered existing Aria streaming session.", flush=True)
+            return
+        except RuntimeError:
+            try:
+                device_client.disconnect(device)
+            except Exception as disconnect_err:
+                print(
+                    f"==> disconnect during recovery failed: {disconnect_err}",
+                    flush=True,
+                )
+            raise
+
+
 def main():
     args = parse_args()
     if bool(args.ui_capture_mock):
@@ -5310,6 +5439,7 @@ def main():
         LiveBoxerViewer.text_labels = text_labels
         LiveBoxerViewer.sem_name_to_id = sem_name_to_id
         LiveBoxerViewer.sem_id_to_name = {v: k for k, v in sem_name_to_id.items()}
+        LiveBoxerViewer.boxernet_ckpt = str(args.ckpt)
         LiveBoxerViewer.initial_prompts_csv = ",".join(text_labels)
         LiveBoxerViewer.HW = int(args.image_hw) if args.image_hw is not None else 960
         LiveBoxerViewer.detector_hw = int(args.detector_hw)
@@ -5383,7 +5513,7 @@ def main():
     )
     print(f"==> Streaming interface: {sc.streaming_interface.name}", flush=True)
     device.set_streaming_config(sc)
-    device.start_streaming()
+    start_streaming_with_session_recovery(device_client, device)
 
     state = StreamState()
     fs_state = LiveFsState() if enable_fs_requested else None
@@ -5552,6 +5682,7 @@ def main():
         LiveBoxerViewer.text_labels = text_labels
         LiveBoxerViewer.sem_name_to_id = sem_name_to_id
         LiveBoxerViewer.sem_id_to_name = sem_id_to_name
+        LiveBoxerViewer.boxernet_ckpt = str(args.ckpt)
         LiveBoxerViewer.initial_prompts_csv = ",".join(text_labels)
         LiveBoxerViewer.HW = HW
         LiveBoxerViewer.detector_hw = args.detector_hw
