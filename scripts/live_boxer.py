@@ -12,18 +12,23 @@ Press 'q' or Esc to quit. Right-drag to orbit, left-drag to pan, scroll to zoom.
 import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
 import colorsys
-import glob
 import hashlib
+import json
 import os
 import platform
 import sys
 import tempfile
+import threading
 import time
 from typing import Optional
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
+
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("VRS_LOG_LEVEL", "ERROR")
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "0")
 
 import cv2
 import moderngl
@@ -94,6 +99,138 @@ TAB20 = [
     (0.090, 0.745, 0.812),
     (0.620, 0.855, 0.898),
 ]
+
+
+def _live_boxer_preferences_path() -> str:
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    if not config_home:
+        config_home = os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(config_home, "boxer", "live_boxer_preferences.json")
+
+
+def _read_live_boxer_preferences() -> dict:
+    path = _live_boxer_preferences_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_live_boxer_preferences(prefs: dict) -> None:
+    path = _live_boxer_preferences_path()
+    tmp_path = f"{path}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(prefs, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    except OSError as err:
+        print(f"==> Failed to save preferences {path}: {err}", flush=True)
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def _apply_live_boxer_window_preferences(ViewerClass) -> None:
+    prefs = _read_live_boxer_preferences()
+    layout = prefs.get("layout", {})
+    if not isinstance(layout, dict):
+        return
+    try:
+        window_w = int(layout.get("window_width", ViewerClass.window_size[0]))
+        window_h = int(layout.get("window_height", ViewerClass.window_size[1]))
+    except (TypeError, ValueError):
+        return
+    if window_w >= 640 and window_h >= 480:
+        ViewerClass.window_size = (window_w, window_h)
+
+
+class _NativeStderrFilter:
+    """Filter noisy native decoder stderr while preserving other stderr output."""
+
+    _SUPPRESSED_SUBSTRINGS = (
+        "PPS id out of range",
+        "Skipping invalid undecodable NALU",
+        "[XPRS][ERROR]: Error at FFmpegDecode.cpp:104: End of file",
+        "Failed to decode frame using xprs",
+        "Warning: Failed to decode rgb image data from camera camera-rgb",
+    )
+
+    def __init__(self) -> None:
+        self._old_stderr_fd: Optional[int] = None
+        self._pipe_read_fd: Optional[int] = None
+        self._pipe_write_fd: Optional[int] = None
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._old_stderr_fd is not None:
+            return
+        try:
+            self._old_stderr_fd = os.dup(2)
+            self._pipe_read_fd, self._pipe_write_fd = os.pipe()
+            os.dup2(self._pipe_write_fd, 2)
+        except OSError:
+            self.stop()
+            return
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._old_stderr_fd is None:
+            return
+        try:
+            os.dup2(self._old_stderr_fd, 2)
+        except OSError:
+            pass
+        for fd_name in ("_pipe_write_fd", "_pipe_read_fd"):
+            fd = getattr(self, fd_name)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, fd_name, None)
+        if self._thread is not None:
+            self._thread.join(timeout=0.25)
+            self._thread = None
+        if self._old_stderr_fd is not None:
+            try:
+                os.close(self._old_stderr_fd)
+            except OSError:
+                pass
+            self._old_stderr_fd = None
+
+    def _pump(self) -> None:
+        if self._pipe_read_fd is None or self._old_stderr_fd is None:
+            return
+        output_fd = self._old_stderr_fd
+        suppressed_previous = False
+        with os.fdopen(os.dup(self._pipe_read_fd), "rb", closefd=True) as pipe:
+            for raw_line in pipe:
+                line = raw_line.decode("utf-8", errors="replace")
+                if any(s in line for s in self._SUPPRESSED_SUBSTRINGS):
+                    suppressed_previous = True
+                    continue
+                if suppressed_previous and not line.strip():
+                    continue
+                suppressed_previous = False
+                try:
+                    os.write(output_fd, raw_line)
+                except OSError:
+                    return
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.stop()
+        return False
 def jet_colors_bgr(scores):
     if len(scores) == 0:
         return []
@@ -112,6 +249,23 @@ def jet_colors_rgb_float(scores):
     bgr = cv2.applyColorMap(u8, cv2.COLORMAP_JET)[0].astype(np.float32) / 255.0
     rgb = bgr[:, ::-1]
     return [tuple(float(c) for c in row) for row in rgb]
+
+
+def red_green_colors_rgb_float(scores):
+    """Return confidence colors where 0 is red and 1 is green."""
+    if len(scores) == 0:
+        return []
+    vals = np.clip(np.array(scores, dtype=np.float32), 0.0, 1.0)
+    rgb = np.stack([1.0 - vals, vals, np.zeros_like(vals)], axis=1)
+    return [tuple(float(c) for c in row) for row in rgb]
+
+
+def red_green_colors_bgr(scores):
+    rgb = red_green_colors_rgb_float(scores)
+    return [
+        tuple(int(np.clip(round(ch * 255.0), 0, 255)) for ch in row[::-1])
+        for row in rgb
+    ]
 
 
 SALIENT_CLASS_RGB = [
@@ -149,11 +303,14 @@ def get_obb_color_arrays(
     sem_ids,
     scores,
     use_class_colors: bool,
+    use_red_green_confidence: bool = False,
 ) -> tuple[list[tuple[int, int, int]], np.ndarray]:
     if len(labels) == 0:
         return [], np.zeros((0, 3), dtype=np.float32)
 
-    if use_class_colors:
+    if use_red_green_confidence:
+        rgb = np.asarray(red_green_colors_rgb_float(scores.tolist()), dtype=np.float32)
+    elif use_class_colors:
         rgb = np.asarray(
             [
                 obb_class_color_rgb(label, int(sem_id))
@@ -171,22 +328,24 @@ def get_obb_color_arrays(
     return bgr, rgb.astype(np.float32)
 
 
+BOXERNET_CHECKPOINT_ALIASES = {
+    "boxernet_hw960in2x6d768-cc243jxd.ckpt": "BoxerOSS (cc243)",
+    "boxernet_hw960in2x6d768-xsx63p5h.ckpt": "BoxerNext (9DoF)",
+}
+
+
 def discover_boxernet_checkpoints(current_path: str = "") -> list[str]:
-    pattern = os.path.join(CKPT_PATH, "boxernet_*")
-    paths = sorted(
-        p
-        for p in glob.glob(pattern)
-        if os.path.isfile(p) and os.path.basename(p).startswith("boxernet_")
-    )
-    if current_path:
-        current_abs = os.path.abspath(os.path.expanduser(current_path))
-        if os.path.exists(current_abs) and current_abs not in paths:
-            paths.insert(0, current_abs)
-    return paths
+    _ = current_path
+    return [
+        os.path.join(CKPT_PATH, filename)
+        for filename in BOXERNET_CHECKPOINT_ALIASES
+        if os.path.isfile(os.path.join(CKPT_PATH, filename))
+    ]
 
 
 def _short_ckpt_name(path: str) -> str:
-    return os.path.basename(path.rstrip(os.sep)) or path
+    basename = os.path.basename(path.rstrip(os.sep)) or path
+    return BOXERNET_CHECKPOINT_ALIASES.get(basename, basename)
 
 
 class FoundationStereoRuntime:
@@ -1039,8 +1198,10 @@ def run_inference(
     enable_owl: bool,
     enable_boxer: bool,
     bb3_use_class_colors: bool,
+    use_red_green_confidence: bool,
     boxer_sdp_w: torch.Tensor,
     rectify_rgb_for_owl_boxes: bool,
+    owl_pinhole_focal_scale: float,
     bench: bool = False,
     render_cpu_overlays: bool = True,
 ):
@@ -1089,8 +1250,11 @@ def run_inference(
         owl_fisheye_cam = build_fisheye_cam_at_image_size(
             intr, T_cr, csize, (image_w, image_h)
         )
+        owl_pinhole_fxy = float(owl_fisheye_cam.f[0].item()) * float(
+            owl_pinhole_focal_scale
+        )
         owl_img_torch, owl_cam = rectify_rgb_for_owl(
-            owl_src_torch, owl_fisheye_cam, HW
+            owl_src_torch, owl_fisheye_cam, HW, pinhole_fxy=owl_pinhole_fxy
         )
         owl_img_torch, owl_cam, owl_rotated0, _ = apply_live_rotation(
             owl_img_torch, owl_cam, live_rotation
@@ -1217,13 +1381,21 @@ def run_inference(
     else:
         viz_2d = viz_rgb
     bb2_texts = [f"{l[:10]} {s:.2f}" for s, l in zip(scores2d, labels2d)]
-    bb2_colors = jet_colors_bgr(scores2d)
+    bb2_colors = (
+        red_green_colors_bgr(scores2d)
+        if use_red_green_confidence
+        else jet_colors_bgr(scores2d)
+    )
     bb2_colors_rgb = [(int(c[2]), int(c[1]), int(c[0])) for c in bb2_colors]
     if render_cpu_overlays and bb2d_display.shape[0] > 0:
         bb2_texts_display = [
             f"{l[:10]} {s:.2f}" for s, l in zip(scores2d_display, labels2d_display)
         ]
-        bb2_colors_display = jet_colors_bgr(scores2d_display)
+        bb2_colors_display = (
+            red_green_colors_bgr(scores2d_display)
+            if use_red_green_confidence
+            else jet_colors_bgr(scores2d_display)
+        )
         viz_2d = render_bb2(
             viz_2d,
             bb2d_display,
@@ -1306,10 +1478,18 @@ def run_inference(
         if n_3d > 0:
             sem_ids3d = obb_pr_w.sem_id.squeeze(-1).cpu().numpy().astype(int).tolist()
             bb3_colors, bb3_rgb_colors = get_obb_color_arrays(
-                labels3d, sem_ids3d, scores3d, bb3_use_class_colors
+                labels3d,
+                sem_ids3d,
+                scores3d,
+                bb3_use_class_colors,
+                False,
             )
             bb3_overlay_colors, bb3_overlay_rgb_colors = get_obb_color_arrays(
-                labels3d, sem_ids3d, scores3d, False
+                labels3d,
+                sem_ids3d,
+                scores3d,
+                False,
+                use_red_green_confidence,
             )
             obb_pr_w.set_color(torch.from_numpy(bb3_rgb_colors).float())
             bb3_texts = [
@@ -1409,6 +1589,7 @@ uniform float line_width;
 uniform vec2 viewport_size;
 out vec3 v_color;
 out float v_prob;
+out float v_quad_y;
 void main() {
     vec4 clip_start = mvp * vec4(start_pos, 1.0);
     vec4 clip_end = mvp * vec4(end_pos, 1.0);
@@ -1430,6 +1611,7 @@ void main() {
     gl_Position = vec4(ndc_pos * w, depth * w, w);
     v_color = line_color;
     v_prob = line_prob;
+    v_quad_y = in_quad_pos.y;
 }
 """
 
@@ -1439,10 +1621,14 @@ uniform float alpha;
 uniform float prob_threshold;
 in vec3 v_color;
 in float v_prob;
+in float v_quad_y;
 out vec4 f_color;
 void main() {
     float final_alpha = v_prob >= prob_threshold ? alpha : 0.0;
-    f_color = vec4(v_color, final_alpha);
+    float v_edge_dist = abs(v_quad_y);
+    float edge_width = max(fwidth(v_edge_dist), 0.001);
+    float edge_alpha = 1.0 - smoothstep(1.0 - edge_width, 1.0, v_edge_dist);
+    f_color = vec4(v_color, final_alpha * edge_alpha);
 }
 """
 
@@ -1481,6 +1667,7 @@ class LiveBoxerViewer(OrbitViewer):
     show_fs_points: bool = True
     show_fs_trajectory: bool = True
     fs_use_depth_colormap: bool = False
+    fs_use_rgb_texture_colors: bool = True
     fs_point_size: float = 2.0
     fs_point_alpha: float = 0.85
     fs_line_width: float = 2.0
@@ -1490,6 +1677,7 @@ class LiveBoxerViewer(OrbitViewer):
     enable_tracker: bool = False
     enable_foundation_stereo: bool = True
     rectify_rgb_for_owl_boxes: bool = False
+    owl_pinhole_focal_scale: float = 1.20
     max_steps: int = 0
     bench: bool = False
     bench_every: int = 30
@@ -1507,6 +1695,7 @@ class LiveBoxerViewer(OrbitViewer):
     show_obbs_3d: bool = True
     show_frustum: bool = True
     show_world_axes: bool = True
+    use_red_green_confidence: bool = True
     show_rgb_fs_points: bool = False
     show_rgb_fs: bool = False
     show_rgb_owl: bool = True
@@ -1524,7 +1713,8 @@ class LiveBoxerViewer(OrbitViewer):
     ui_panel_width = 520
     rgb_panel_width = 960
     viz_panel_width = 0
-    prompt_bar_height = 112.0
+    prompt_bar_height = 150.0
+    text_scale = 0.90
     frustum_scale = 0.12
     initial_prompts_csv: str = ""
 
@@ -1558,6 +1748,11 @@ class LiveBoxerViewer(OrbitViewer):
         self._frame_count = 0
         self._frame_count_t0 = time.perf_counter()
         self._last_loop_t0 = time.perf_counter()
+        self._startup_follow_t0 = time.perf_counter()
+        self._startup_follow_started_t: Optional[float] = None
+        self._startup_follow_done = False
+        self._startup_follow_delay_s = 1.0
+        self._startup_follow_duration_s = 5.0
         self._render_steps = 0
         self._fps = 0.0
         self._prediction_count = 0
@@ -1603,7 +1798,7 @@ class LiveBoxerViewer(OrbitViewer):
         self._recording = False
         self._record_dir: Optional[str] = None
         self._record_frame_idx = 0
-        self._record_fps = max(1.0, float(type(self).record_fps))
+        self._record_fps = min(20.0, max(2.0, float(type(self).record_fps)))
         self._last_record_mp4: Optional[str] = None
         self._ui_capture_path = str(type(self).ui_capture_path or "")
         self._ui_capture_frame = max(1, int(type(self).ui_capture_frame))
@@ -1648,7 +1843,14 @@ class LiveBoxerViewer(OrbitViewer):
                 uniform float alpha;
                 out vec4 f_color;
                 void main() {
-                    f_color = vec4(v_color, alpha);
+                    vec2 point_uv = gl_PointCoord * 2.0 - 1.0;
+                    float radius = length(point_uv);
+                    float edge_width = max(fwidth(radius), 0.001);
+                    float point_alpha = 1.0 - smoothstep(1.0 - edge_width, 1.0, radius);
+                    if (point_alpha <= 0.0) {
+                        discard;
+                    }
+                    f_color = vec4(v_color, alpha * point_alpha);
                 }
             """,
         )
@@ -1706,10 +1908,17 @@ class LiveBoxerViewer(OrbitViewer):
         self._n_track_matches = 0
         self._ui_interaction_active = False
         self._resize_drag_active = False
+        self._preferences = _read_live_boxer_preferences()
+        self._last_saved_preferences_key: Optional[str] = None
+        style = imgui.get_style()
+        self._base_imgui_font_scale = float(getattr(style, "font_scale_main", 1.0))
+        self.text_scale = float(type(self).text_scale)
+        self._apply_layout_preferences()
         self._resize_ui_panel_width = float(type(self).ui_panel_width)
         self._resize_rgb_panel_width = float(type(self).rgb_panel_width)
         self._resize_viz_panel_width = float(type(self).viz_panel_width)
         self.prompt_editor_text = str(type(self).initial_prompts_csv)
+        self.prompt_collection_name = ""
         self.boxernet_ckpts = discover_boxernet_checkpoints(str(type(self).boxernet_ckpt))
         self.current_boxernet_ckpt = str(type(self).boxernet_ckpt or "")
         if not self.current_boxernet_ckpt and self.boxernet_ckpts:
@@ -1741,11 +1950,13 @@ class LiveBoxerViewer(OrbitViewer):
         self.show_obbs_3d = bool(type(self).show_obbs_3d)
         self.show_frustum = bool(type(self).show_frustum)
         self.show_world_axes = bool(type(self).show_world_axes)
+        self.use_red_green_confidence = bool(type(self).use_red_green_confidence)
         self.enable_owl = bool(type(self).enable_owl)
         self.enable_boxer = bool(type(self).enable_boxer)
         self.enable_tracker = bool(type(self).enable_tracker)
         self.enable_foundation_stereo = bool(type(self).enable_foundation_stereo)
         self.rectify_rgb_for_owl_boxes = bool(type(self).rectify_rgb_for_owl_boxes)
+        self.owl_pinhole_focal_scale = float(type(self).owl_pinhole_focal_scale)
         self.fs_debug_stats = bool(type(self).fs_debug_stats)
         self.fsp_every = max(1, int(type(self).fsp_every))
         self.fs_disparity_median = max(0, int(type(self).fs_disparity_median))
@@ -1765,6 +1976,7 @@ class LiveBoxerViewer(OrbitViewer):
         self.show_raw_by_track_match = bool(type(self).show_raw_by_track_match)
         self.show_track_assoc_lines = bool(type(self).show_track_assoc_lines)
         self.fs_use_depth_colormap = bool(type(self).fs_use_depth_colormap)
+        self.fs_use_rgb_texture_colors = bool(type(self).fs_use_rgb_texture_colors)
         self.fs_color_points_by_obb = bool(type(self).fs_color_points_by_obb)
         self.use_fs_for_boxer_sdp = bool(type(self).use_fs_for_boxer_sdp)
         self.fs_boxer_max_points = int(type(self).fs_boxer_max_points)
@@ -1776,6 +1988,10 @@ class LiveBoxerViewer(OrbitViewer):
         self.frustum_line_width = 3.0
         self.axis_line_width = 5.0
         self.axis_length = 0.5
+        self.axis_z_offset = -2.0
+        self._apply_ui_preferences()
+        self.tracker.conf_threshold = float(self.thresh3d)
+        self._last_saved_preferences_key = self._current_preferences_key()
 
         # Better default viewing pose: look down at origin
         self.camera_distance = 4.0
@@ -1836,13 +2052,14 @@ class LiveBoxerViewer(OrbitViewer):
             flush=True,
         )
 
-    def _apply_prompt_editor(self) -> None:
-        prompts = [s.strip() for s in self.prompt_editor_text.split(",")]
-        prompts = [s for s in prompts if s]
+    def _apply_prompts(self, prompts: list[str], collection_name: str = "") -> None:
+        prompts = [str(s).strip() for s in prompts if str(s).strip()]
         if not prompts:
             return
         self.owl.set_text_prompts(prompts)
         self.text_labels = list(prompts)
+        self.prompt_editor_text = ",".join(self.text_labels)
+        self.prompt_collection_name = str(collection_name)
         self.sem_name_to_id = {label: i for i, label in enumerate(self.text_labels)}
         self.sem_id_to_name = {i: label for i, label in enumerate(self.text_labels)}
         self._reset_tracker_state()
@@ -1850,6 +2067,14 @@ class LiveBoxerViewer(OrbitViewer):
             f"==> Updated live text prompts: {len(self.text_labels)} -> {', '.join(self.text_labels)}",
             flush=True,
         )
+
+    def _apply_prompt_editor(self) -> None:
+        prompts = [s.strip() for s in self.prompt_editor_text.split(",")]
+        self._apply_prompts(prompts)
+
+    def _apply_prompt_collection(self, collection_key: str, display_name: str) -> None:
+        prompts = load_text_labels(collection_key)
+        self._apply_prompts(prompts, collection_name=display_name)
 
     # -- viewport / camera --
 
@@ -1926,6 +2151,299 @@ class LiveBoxerViewer(OrbitViewer):
             self.ui_panel_width, self.rgb_panel_width, self.viz_panel_width
         )
 
+    def _apply_layout_preferences(self) -> None:
+        layout = self._preferences.get("layout", {})
+        ui = self._preferences.get("ui", {})
+        if not isinstance(layout, dict):
+            layout = {}
+        if not isinstance(ui, dict):
+            ui = {}
+        try:
+            self.ui_panel_width = float(
+                layout.get("ui_panel_width", type(self).ui_panel_width)
+            )
+            self.rgb_panel_width = float(
+                layout.get("rgb_panel_width", type(self).rgb_panel_width)
+            )
+            self.viz_panel_width = float(
+                layout.get("viz_panel_width", type(self).viz_panel_width)
+            )
+            self.text_scale = float(ui.get("text_scale", type(self).text_scale))
+        except (TypeError, ValueError):
+            self.ui_panel_width = float(type(self).ui_panel_width)
+            self.rgb_panel_width = float(type(self).rgb_panel_width)
+            self.viz_panel_width = float(type(self).viz_panel_width)
+            self.text_scale = float(type(self).text_scale)
+            return
+        self.text_scale = float(np.clip(self.text_scale, 0.10, 1.15))
+        self._apply_text_scale()
+        self._clamp_panel_widths()
+
+    def _apply_text_scale(self) -> None:
+        style = imgui.get_style()
+        if hasattr(style, "font_scale_main"):
+            style.font_scale_main = float(self._base_imgui_font_scale) * float(self.text_scale)
+
+    def _current_layout_preferences_tuple(self) -> tuple[float, float, float, int, int, float]:
+        win_w, win_h = self.wnd.size
+        return (
+            float(round(self.ui_panel_width, 2)),
+            float(round(self.rgb_panel_width, 2)),
+            float(round(self.viz_panel_width, 2)),
+            int(win_w),
+            int(win_h),
+            float(round(self.text_scale, 3)),
+        )
+
+    @staticmethod
+    def _pref_bool(ui: dict, key: str, default: bool) -> bool:
+        value = ui.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    @staticmethod
+    def _pref_float(
+        ui: dict,
+        key: str,
+        default: float,
+        min_value: Optional[float] = None,
+        max_value: Optional[float] = None,
+    ) -> float:
+        try:
+            value = float(ui.get(key, default))
+        except (TypeError, ValueError):
+            value = float(default)
+        if min_value is not None or max_value is not None:
+            lo = -np.inf if min_value is None else float(min_value)
+            hi = np.inf if max_value is None else float(max_value)
+            value = float(np.clip(value, lo, hi))
+        return value
+
+    @staticmethod
+    def _pref_int(
+        ui: dict,
+        key: str,
+        default: int,
+        min_value: Optional[int] = None,
+        max_value: Optional[int] = None,
+    ) -> int:
+        try:
+            value = int(round(float(ui.get(key, default))))
+        except (TypeError, ValueError):
+            value = int(default)
+        if min_value is not None:
+            value = max(int(min_value), value)
+        if max_value is not None:
+            value = min(int(max_value), value)
+        return value
+
+    @staticmethod
+    def _pref_str(ui: dict, key: str, default: str) -> str:
+        value = ui.get(key, default)
+        return str(value) if value is not None else str(default)
+
+    def _apply_ui_preferences(self) -> None:
+        ui = self._preferences.get("ui", {})
+        if not isinstance(ui, dict):
+            return
+
+        self.thresh2d = self._pref_float(ui, "thresh2d", self.thresh2d, 0.0, 1.0)
+        self.thresh3d = self._pref_float(ui, "thresh3d", self.thresh3d, 0.0, 1.0)
+        self.owl_nms_iou = self._pref_float(ui, "owl_nms_iou", self.owl_nms_iou, 0.05, 1.0)
+        self.enable_foundation_stereo = self._pref_bool(
+            ui, "enable_foundation_stereo", self.enable_foundation_stereo
+        )
+        self.enable_owl = self._pref_bool(ui, "enable_owl", self.enable_owl)
+        self.enable_boxer = self._pref_bool(ui, "enable_boxer", self.enable_boxer)
+        self.enable_tracker = self._pref_bool(ui, "enable_tracker", self.enable_tracker)
+        self.rectify_rgb_for_owl_boxes = self._pref_bool(
+            ui, "rectify_rgb_for_owl_boxes", self.rectify_rgb_for_owl_boxes
+        )
+        self.owl_pinhole_focal_scale = self._pref_float(
+            ui, "owl_pinhole_focal_scale", self.owl_pinhole_focal_scale, 0.25, 4.0
+        )
+        self.use_fs_for_boxer_sdp = self._pref_bool(
+            ui, "use_fs_for_boxer_sdp", self.use_fs_for_boxer_sdp
+        )
+        self.bb3_use_class_colors = self._pref_bool(
+            ui, "bb3_use_class_colors", self.bb3_use_class_colors
+        )
+        self.use_red_green_confidence = self._pref_bool(
+            ui, "use_red_green_confidence", self.use_red_green_confidence
+        )
+        self.show_rgb_fs_points = self._pref_bool(
+            ui, "show_rgb_fs_points", self.show_rgb_fs_points
+        )
+        self.show_rgb_fs = self._pref_bool(ui, "show_rgb_fs", self.show_rgb_fs)
+        self.show_rgb_owl = self._pref_bool(ui, "show_rgb_owl", self.show_rgb_owl)
+        self.show_rgb_boxer = self._pref_bool(ui, "show_rgb_boxer", self.show_rgb_boxer)
+        self.show_rgb_tracker = self._pref_bool(
+            ui, "show_rgb_tracker", self.show_rgb_tracker
+        )
+        self.split_rgb_overlays = self._pref_bool(
+            ui, "split_rgb_overlays", self.split_rgb_overlays
+        )
+        self.bb2_line_width = self._pref_int(
+            ui, "bb2_line_width", self.bb2_line_width, 1, 12
+        )
+        self.bb3_image_line_width = self._pref_int(
+            ui, "bb3_image_line_width", self.bb3_image_line_width, 1, 12
+        )
+        self.follow_mode = self._pref_bool(ui, "follow_mode", self.follow_mode)
+        self.follow_back = self._pref_float(ui, "follow_back", self.follow_back, 0.05, 10.0)
+        self.follow_up = self._pref_float(ui, "follow_up", self.follow_up, 0.0, 10.0)
+        self.follow_lookahead = self._pref_float(
+            ui, "follow_lookahead", self.follow_lookahead, 0.0, 3.0
+        )
+        self.follow_smoothing = self._pref_float(
+            ui, "follow_smoothing", self.follow_smoothing, 0.0, 1.0
+        )
+        self.show_obbs_3d = self._pref_bool(ui, "show_obbs_3d", self.show_obbs_3d)
+        self.show_raw_by_track_match = self._pref_bool(
+            ui, "show_raw_by_track_match", self.show_raw_by_track_match
+        )
+        self.show_track_assoc_lines = self._pref_bool(
+            ui, "show_track_assoc_lines", self.show_track_assoc_lines
+        )
+        self.line_width = self._pref_float(ui, "line_width", self.line_width, 1.0, 10.0)
+        self.tracker_line_width = self._pref_float(
+            ui, "tracker_line_width", self.tracker_line_width, 2.0, 16.0
+        )
+        self.show_frustum = self._pref_bool(ui, "show_frustum", self.show_frustum)
+        self.show_world_axes = self._pref_bool(ui, "show_world_axes", self.show_world_axes)
+        self.show_fs_points = self._pref_bool(ui, "show_fs_points", self.show_fs_points)
+        self.fs_use_depth_colormap = self._pref_bool(
+            ui, "fs_use_depth_colormap", self.fs_use_depth_colormap
+        )
+        self.fs_use_rgb_texture_colors = self._pref_bool(
+            ui, "fs_use_rgb_texture_colors", self.fs_use_rgb_texture_colors
+        )
+        self.fs_color_points_by_obb = self._pref_bool(
+            ui, "fs_color_points_by_obb", self.fs_color_points_by_obb
+        )
+        self.fs_point_size = self._pref_float(
+            ui, "fs_point_size", self.fs_point_size, 1.0, 8.0
+        )
+        self.fs_point_alpha = self._pref_float(
+            ui, "fs_point_alpha", self.fs_point_alpha, 0.05, 1.0
+        )
+        self._record_fps = float(
+            self._pref_int(ui, "record_fps", int(round(self._record_fps)), 2, 20)
+        )
+        self.text_scale = self._pref_float(ui, "text_scale", self.text_scale, 0.10, 1.15)
+        self._apply_text_scale()
+
+        prompt_text = self._pref_str(ui, "prompt_editor_text", self.prompt_editor_text)
+        if prompt_text != self.prompt_editor_text:
+            self.prompt_editor_text = prompt_text
+            if prompt_text.strip():
+                self._apply_prompt_editor()
+
+        ckpt_path = self._pref_str(ui, "current_boxernet_ckpt", self.current_boxernet_ckpt)
+        if ckpt_path:
+            ckpt_abs = os.path.abspath(os.path.expanduser(ckpt_path))
+            current_abs = os.path.abspath(os.path.expanduser(self.current_boxernet_ckpt))
+            if ckpt_abs != current_abs and os.path.exists(ckpt_abs):
+                self._reload_boxernet_checkpoint(ckpt_abs)
+            ckpt_abs_list = [
+                os.path.abspath(os.path.expanduser(path)) for path in self.boxernet_ckpts
+            ]
+            if ckpt_abs in ckpt_abs_list:
+                self.boxernet_ckpt_index = ckpt_abs_list.index(ckpt_abs)
+        self.boxernet_ckpt_index = self._pref_int(
+            ui,
+            "boxernet_ckpt_index",
+            self.boxernet_ckpt_index,
+            0,
+            max(0, len(self.boxernet_ckpts) - 1),
+        )
+        self.prompt_collection_name = self._pref_str(
+            ui, "prompt_collection_name", self.prompt_collection_name
+        )
+
+        self.enable_boxer = bool(self.enable_boxer and self.enable_owl)
+        self.enable_tracker = bool(
+            self.enable_tracker and self.enable_boxer and self.enable_owl
+        )
+
+    def _current_ui_preferences(self) -> dict:
+        return {
+            "text_scale": float(round(self.text_scale, 3)),
+            "thresh2d": float(round(self.thresh2d, 4)),
+            "thresh3d": float(round(self.thresh3d, 4)),
+            "owl_nms_iou": float(round(self.owl_nms_iou, 4)),
+            "enable_foundation_stereo": bool(self.enable_foundation_stereo),
+            "enable_owl": bool(self.enable_owl),
+            "enable_boxer": bool(self.enable_boxer),
+            "enable_tracker": bool(self.enable_tracker),
+            "rectify_rgb_for_owl_boxes": bool(self.rectify_rgb_for_owl_boxes),
+            "owl_pinhole_focal_scale": float(round(self.owl_pinhole_focal_scale, 4)),
+            "use_fs_for_boxer_sdp": bool(self.use_fs_for_boxer_sdp),
+            "bb3_use_class_colors": bool(self.bb3_use_class_colors),
+            "use_red_green_confidence": bool(self.use_red_green_confidence),
+            "show_rgb_fs_points": bool(self.show_rgb_fs_points),
+            "show_rgb_fs": bool(self.show_rgb_fs),
+            "show_rgb_owl": bool(self.show_rgb_owl),
+            "show_rgb_boxer": bool(self.show_rgb_boxer),
+            "show_rgb_tracker": bool(self.show_rgb_tracker),
+            "split_rgb_overlays": bool(self.split_rgb_overlays),
+            "bb2_line_width": int(round(self.bb2_line_width)),
+            "bb3_image_line_width": int(round(self.bb3_image_line_width)),
+            "follow_mode": bool(self.follow_mode),
+            "follow_back": float(round(self.follow_back, 4)),
+            "follow_up": float(round(self.follow_up, 4)),
+            "follow_lookahead": float(round(self.follow_lookahead, 4)),
+            "follow_smoothing": float(round(self.follow_smoothing, 4)),
+            "show_obbs_3d": bool(self.show_obbs_3d),
+            "show_raw_by_track_match": bool(self.show_raw_by_track_match),
+            "show_track_assoc_lines": bool(self.show_track_assoc_lines),
+            "line_width": float(round(self.line_width, 4)),
+            "tracker_line_width": float(round(self.tracker_line_width, 4)),
+            "show_frustum": bool(self.show_frustum),
+            "show_world_axes": bool(self.show_world_axes),
+            "show_fs_points": bool(self.show_fs_points),
+            "fs_use_depth_colormap": bool(self.fs_use_depth_colormap),
+            "fs_use_rgb_texture_colors": bool(self.fs_use_rgb_texture_colors),
+            "fs_color_points_by_obb": bool(self.fs_color_points_by_obb),
+            "fs_point_size": float(round(self.fs_point_size, 4)),
+            "fs_point_alpha": float(round(self.fs_point_alpha, 4)),
+            "record_fps": int(round(self._record_fps)),
+            "prompt_editor_text": str(self.prompt_editor_text),
+            "prompt_collection_name": str(self.prompt_collection_name),
+            "current_boxernet_ckpt": str(self.current_boxernet_ckpt),
+            "boxernet_ckpt_index": int(self.boxernet_ckpt_index),
+        }
+
+    def _current_preferences(self) -> dict:
+        layout_tuple = self._current_layout_preferences_tuple()
+        prefs = dict(self._preferences)
+        prefs["layout"] = {
+            "ui_panel_width": layout_tuple[0],
+            "rgb_panel_width": layout_tuple[1],
+            "viz_panel_width": layout_tuple[2],
+            "window_width": layout_tuple[3],
+            "window_height": layout_tuple[4],
+        }
+        ui = self._current_ui_preferences()
+        ui["text_scale"] = layout_tuple[5]
+        prefs["ui"] = ui
+        return prefs
+
+    def _current_preferences_key(self) -> str:
+        return json.dumps(self._current_preferences(), sort_keys=True, separators=(",", ":"))
+
+    def _save_preferences(self) -> None:
+        prefs = self._current_preferences()
+        prefs_key = json.dumps(prefs, sort_keys=True, separators=(",", ":"))
+        if prefs_key == self._last_saved_preferences_key:
+            return
+        self._preferences = prefs
+        _write_live_boxer_preferences(self._preferences)
+        self._last_saved_preferences_key = prefs_key
+
     def get_camera_matrices(self):
         from utils.viewer_3d import _look_at, _perspective_projection
 
@@ -1968,15 +2486,11 @@ class LiveBoxerViewer(OrbitViewer):
 
     def _fmt_ms_mean30(self, name: str, value: float, signed: bool = False) -> str:
         fmt = "+.1f" if signed else ".1f"
-        return f"{float(value):{fmt}} ms (m30 {self._timing_mean30(name, value):.1f} ms)"
+        return f"{self._timing_mean30(name, value):{fmt}} ms"
 
     def _fmt_value_mean30(self, name: str, value: float, suffix: str = "") -> str:
         suffix_part = f" {suffix}" if suffix else ""
-        m30_suffix = suffix_part
-        return (
-            f"{float(value):.1f}{suffix_part} "
-            f"(m30 {self._timing_mean30(name, value):.1f}{m30_suffix})"
-        )
+        return f"{self._timing_mean30(name, value):.1f}{suffix_part}"
 
     @staticmethod
     def _imgui_ui_busy() -> bool:
@@ -2211,8 +2725,10 @@ class LiveBoxerViewer(OrbitViewer):
             self.enable_owl,
             self.enable_boxer and self.enable_owl,
             self.bb3_use_class_colors,
+            self.use_red_green_confidence,
             boxer_sdp_w,
             self.rectify_rgb_for_owl_boxes,
+            self.owl_pinhole_focal_scale,
             bench=self._bench_enabled,
             render_cpu_overlays=bool(self.split_rgb_overlays)
             or not bool(type(self).rgb_gpu_overlays),
@@ -2811,6 +3327,7 @@ class LiveBoxerViewer(OrbitViewer):
         self._axis_count = 0
 
         origin = np.asarray(origin_np, dtype=np.float32).reshape(3)
+        origin[2] += float(self.axis_z_offset)
         self._axis_origin = origin.copy()
         length = float(self.axis_length)
         axes = np.array(
@@ -2870,8 +3387,131 @@ class LiveBoxerViewer(OrbitViewer):
         bgr = cv2.applyColorMap(u8, cv2.COLORMAP_JET)[0].astype(np.float32) / 255.0
         return bgr[:, ::-1].astype("f4")
 
+    @staticmethod
+    def _sample_rectified_image_colors(image: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
+        image_h, image_w = image.shape[:2]
+        mask_h, mask_w = valid_mask.shape[:2]
+        if (image_h, image_w) != (mask_h, mask_w):
+            step_y = image_h // max(mask_h, 1)
+            step_x = image_w // max(mask_w, 1)
+            if (
+                step_y > 0
+                and step_x > 0
+                and image_h % mask_h == 0
+                and image_w % mask_w == 0
+            ):
+                image = image[0:image_h:step_y, 0:image_w:step_x]
+            else:
+                image = cv2.resize(
+                    image,
+                    (int(mask_w), int(mask_h)),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+        sampled = image[valid_mask]
+        if sampled.ndim == 1:
+            vals = sampled.astype(np.float32) / 255.0
+            return np.stack([vals, vals, vals], axis=1).astype("f4")
+        if sampled.shape[1] == 1:
+            vals = sampled[:, 0].astype(np.float32) / 255.0
+            return np.stack([vals, vals, vals], axis=1).astype("f4")
+        return sampled[:, :3].astype(np.float32) / 255.0
+
+    def _rgb_texture_colors_for_fs_points(
+        self,
+        pts_world_raw: np.ndarray,
+        fallback_image: np.ndarray,
+        fallback_valid_mask: np.ndarray,
+        pts_world_view: Optional[np.ndarray] = None,
+        obb_blend: Optional[float] = None,
+    ) -> np.ndarray:
+        colors = self._sample_rectified_image_colors(fallback_image, fallback_valid_mask)
+
+        def finish(out_colors: np.ndarray) -> np.ndarray:
+            if pts_world_view is not None:
+                out_colors = self._color_fs_points_from_obbs(
+                    pts_world_view.astype(np.float32), out_colors, blend=obb_blend
+                )
+            return out_colors.astype("f4")
+
+        if self.state is None or pts_world_raw is None or len(pts_world_raw) == 0:
+            return finish(colors)
+
+        frame, T_wr, intr, T_cr, csize = self.state.snapshot()
+        if frame is None or T_wr is None or intr is None or T_cr is None or csize is None:
+            return finish(colors)
+
+        arr_rgb, _ts_ns = frame
+        if arr_rgb is None or arr_rgb.ndim < 2:
+            return finish(colors)
+        image_h, image_w = arr_rgb.shape[:2]
+        if image_w <= 0 or image_h <= 0:
+            return finish(colors)
+
+        cam = build_fisheye_cam_at_image_size(
+            intr,
+            T_cr,
+            csize,
+            (image_w, image_h),
+        )
+        T_world_cam = T_wr.float() @ cam.T_camera_rig.inverse()
+        pts_world_t = torch.from_numpy(
+            np.asarray(pts_world_raw, dtype=np.float32)
+        ).to(device=T_world_cam.device, dtype=torch.float32)
+        pts_cam = T_world_cam.inverse().transform(pts_world_t)
+        pts2, valid = cam.project(pts_cam.unsqueeze(0))
+        pts2_np = pts2.squeeze(0).detach().cpu().numpy().astype(np.float32)
+        valid_np = valid.squeeze(0).detach().cpu().numpy().astype(bool).reshape(-1)
+        z_cam = pts_cam[..., 2].detach().cpu().numpy()
+        valid_np &= np.isfinite(z_cam) & (z_cam > 0.0)
+        xs = np.rint(pts2_np[:, 0]).astype(np.int32)
+        ys = np.rint(pts2_np[:, 1]).astype(np.int32)
+        inside = (
+            valid_np
+            & (xs >= 0)
+            & (xs < int(image_w))
+            & (ys >= 0)
+            & (ys < int(image_h))
+        )
+        if not np.any(inside):
+            return finish(colors)
+
+        rgb = arr_rgb
+        if rgb.ndim == 2:
+            vals = rgb[ys[inside], xs[inside]].astype(np.float32) / 255.0
+            colors[inside] = np.stack([vals, vals, vals], axis=1)
+        else:
+            colors[inside] = rgb[ys[inside], xs[inside], :3].astype(np.float32) / 255.0
+        return finish(colors)
+
+    def _fs_point_colors(
+        self,
+        z_valid: np.ndarray,
+        left_rect: np.ndarray,
+        valid_mask: np.ndarray,
+        pts_world: np.ndarray,
+        pts_world_raw: np.ndarray,
+    ) -> np.ndarray:
+        if self.fs_use_rgb_texture_colors:
+            return self._rgb_texture_colors_for_fs_points(
+                pts_world_raw.astype(np.float32),
+                left_rect,
+                valid_mask,
+                pts_world.astype(np.float32),
+                obb_blend=0.55,
+            )
+        if self.fs_use_depth_colormap:
+            colors = self._depth_jet_colors(z_valid, near=0.1, far=5.0)
+        else:
+            colors = np.ones((int(valid_mask.sum()), 3), dtype="f4")
+        return self._color_fs_points_from_obbs(
+            pts_world.astype(np.float32), colors.astype(np.float32)
+        )
+
     def _color_fs_points_from_obbs(
-        self, pts_world: np.ndarray, base_colors: np.ndarray
+        self,
+        pts_world: np.ndarray,
+        base_colors: np.ndarray,
+        blend: Optional[float] = None,
     ) -> np.ndarray:
         if (
             not self.fs_color_points_by_obb
@@ -2883,15 +3523,6 @@ class LiveBoxerViewer(OrbitViewer):
             return base_colors
 
         obbs = self._latest_obbs_3d.clone()
-        expand_m = 0.03
-        bb3_object = obbs.bb3_object.clone()
-        bb3_object[:, 0] -= expand_m
-        bb3_object[:, 1] += expand_m
-        bb3_object[:, 2] -= expand_m
-        bb3_object[:, 3] += expand_m
-        bb3_object[:, 4] -= expand_m
-        bb3_object[:, 5] += expand_m
-        obbs.set_bb3_object(bb3_object)
 
         obb_colors = obbs.color.cpu().numpy().astype(np.float32)
         if obb_colors.ndim == 1:
@@ -2910,7 +3541,14 @@ class LiveBoxerViewer(OrbitViewer):
                 obbs[idx].points_inside_bb3(pts_world_t).cpu().numpy().astype(bool)
             )
             if np.any(mask):
-                out[mask] = obb_colors[idx]
+                if blend is None:
+                    out[mask] = obb_colors[idx]
+                else:
+                    alpha = float(np.clip(blend, 0.0, 1.0))
+                    out[mask] = (
+                        (1.0 - alpha) * out[mask]
+                        + alpha * obb_colors[idx].reshape(1, 3)
+                    )
                 covered |= mask
         self._fs_points_in_obbs = int(covered.sum())
         return out
@@ -3156,6 +3794,32 @@ class LiveBoxerViewer(OrbitViewer):
         finally:
             self.follow_smoothing = prev_blend
 
+    def _maybe_update_startup_follow_view(self) -> None:
+        if self._startup_follow_done:
+            return
+        now = time.perf_counter()
+        if self._startup_follow_started_t is None:
+            if now - self._startup_follow_t0 < self._startup_follow_delay_s:
+                return
+            if self.follow_mode:
+                self._startup_follow_done = True
+                return
+            if self._get_follow_pose() is None:
+                return
+            self.follow_mode = True
+            self._startup_follow_started_t = now
+            return
+
+        if now - self._startup_follow_started_t < self._startup_follow_duration_s:
+            return
+        follow_pose = self._get_follow_pose()
+        if follow_pose is not None:
+            self._seed_free_orbit_from_follow_view(follow_pose)
+        self._rebuild_world_axes(self.camera_target)
+        self.follow_mode = False
+        self._startup_follow_done = True
+        self._target_inited = True
+
     def _maybe_print_fs_debug_stats(
         self,
         baseline: float,
@@ -3314,12 +3978,12 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_overlay_depths = z[valid].astype(np.float32)
         self._fs_boxer_pts_world = pts_world_raw
         self._fs_boxer_pair_ts = pair_ts
-        if self.fs_use_depth_colormap:
-            colors = self._depth_jet_colors(z[valid], near=0.1, far=5.0)
-        else:
-            colors = np.ones((int(valid.sum()), 3), dtype="f4")
-        colors = self._color_fs_points_from_obbs(
-            pts_world.astype(np.float32), colors.astype(np.float32)
+        colors = self._fs_point_colors(
+            z[valid].astype(np.float32),
+            left_rect,
+            valid,
+            pts_world.astype(np.float32),
+            pts_world_raw.astype(np.float32),
         )
         fs_mark("colors")
         data = np.concatenate([pts_world, colors], axis=1).astype("f4")
@@ -3365,10 +4029,7 @@ class LiveBoxerViewer(OrbitViewer):
             self._fs_last_pipeline_ms = (fs_apply_t - float(meta["start_t"])) * 1000.0
             self._push_timing("fs_pipe", self._fs_last_pipeline_ms)
         if not self._fs_target_inited:
-            self._seed_free_orbit_from_follow_view(T_world_rect, T_world_device)
-            self._rebuild_world_axes(self.camera_target)
             self._fs_target_inited = True
-            self._target_inited = True
         self._update_fs_geometry(pair_ts, T_world_rect, linear, depth, left_rect)
         fs_mark("geometry")
         if self._bench_enabled:
@@ -3699,12 +4360,12 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_overlay_depths = z[valid].astype(np.float32)
         self._fs_boxer_pts_world = pts_world_raw
         self._fs_boxer_pair_ts = pair_ts
-        if self.fs_use_depth_colormap:
-            colors = self._depth_jet_colors(z[valid], near=0.1, far=5.0)
-        else:
-            colors = np.ones((int(valid.sum()), 3), dtype="f4")
-        colors = self._color_fs_points_from_obbs(
-            pts_world.astype(np.float32), colors.astype(np.float32)
+        colors = self._fs_point_colors(
+            z[valid].astype(np.float32),
+            left_rect,
+            valid,
+            pts_world.astype(np.float32),
+            pts_world_raw.astype(np.float32),
         )
         fs_mark("colors")
         data = np.concatenate([pts_world, colors], axis=1).astype("f4")
@@ -3749,10 +4410,7 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_last_pipeline_ms = (fs_apply_t - fs_total_t0) * 1000.0
         self._push_timing("fs_pipe", self._fs_last_pipeline_ms)
         if not self._fs_target_inited:
-            self._seed_free_orbit_from_follow_view(T_world_rect, T_world_device)
-            self._rebuild_world_axes(self.camera_target)
             self._fs_target_inited = True
-            self._target_inited = True
         self._update_fs_geometry(pair_ts, T_world_rect, linear, depth, left_rect)
         fs_mark("geometry")
         if self._bench_enabled:
@@ -3903,6 +4561,7 @@ class LiveBoxerViewer(OrbitViewer):
             t_rgb = time.perf_counter()
             self._maybe_run_inference()
             rgb_update_ms = (time.perf_counter() - t_rgb) * 1000.0
+            self._maybe_update_startup_follow_view()
         if not self.enable_owl:
             self._prediction_fps = 0.0
         loop_body_ms = (time.perf_counter() - loop_t0) * 1000.0
@@ -4134,7 +4793,6 @@ class LiveBoxerViewer(OrbitViewer):
         viz_panel_width = float(self._resize_viz_panel_width)
         prompt_bar_h = float(type(self).prompt_bar_height)
         splitter_w = 14.0
-        splitter_bar_w = 6.0
 
         def render_splitter(name: str, center_x: float, on_drag):
             nonlocal ui_control_active
@@ -4151,26 +4809,11 @@ class LiveBoxerViewer(OrbitViewer):
             )
             imgui.push_style_color(imgui.COLOR_WINDOW_BG, 0.0, 0.0, 0.0, 0.0)
             imgui.begin(name, flags=flags)
-            draw_list = imgui.get_window_draw_list()
-            win_pos = imgui.get_window_position()
             imgui.set_cursor_pos((0.0, 0.0))
             imgui.invisible_button(
                 f"##{name}_drag", imgui.ImVec2(float(splitter_w), float(splitter_h))
             )
-            hovered = imgui.is_item_hovered()
             active = imgui.is_item_active()
-            active_col = imgui.get_color_u32_rgba(0.92, 0.92, 0.92, 0.95)
-            idle_col = imgui.get_color_u32_rgba(0.62, 0.62, 0.62, 0.85)
-            col = active_col if hovered or active else idle_col
-            bar_x0 = win_pos.x + 0.5 * (splitter_w - splitter_bar_w)
-            bar_x1 = bar_x0 + splitter_bar_w
-            draw_list.add_rect_filled(
-                bar_x0,
-                win_pos.y,
-                bar_x1,
-                win_pos.y + splitter_h,
-                col,
-            )
             if active:
                 ui_control_active = True
                 self._resize_drag_active = True
@@ -4232,13 +4875,33 @@ class LiveBoxerViewer(OrbitViewer):
             imgui.pop_item_width()
             return changed, value
 
+        def ui_checkbox(label, value):
+            nonlocal ui_control_active
+            changed, value = imgui.checkbox(label, value)
+            ui_control_active = ui_control_active or bool(changed) or imgui.is_item_active()
+            return changed, value
+
+        def ui_button(label):
+            nonlocal ui_control_active
+            clicked = imgui.button(label)
+            ui_control_active = ui_control_active or bool(clicked) or imgui.is_item_active()
+            return clicked
+
+        def ui_input_text(label, value, buffer_length):
+            nonlocal ui_control_active
+            changed, value = imgui.input_text(label, value, buffer_length)
+            ui_control_active = ui_control_active or bool(changed) or imgui.is_item_active()
+            return changed, value
+
+        def ui_input_text_multiline(label, value, width, height, flags=0):
+            nonlocal ui_control_active
+            changed, value = imgui.input_text_multiline(
+                label, value, width, height, flags
+            )
+            ui_control_active = ui_control_active or bool(changed) or imgui.is_item_active()
+            return changed, value
+
         if ui_section("Default", default_open=True):
-            _, self.thresh2d = labeled_slider_float(
-                "2D thr", self.thresh2d, 0.0, 1.0
-            )
-            _, self.thresh3d = labeled_slider_float(
-                "3D thr", self.thresh3d, 0.0, 1.0
-            )
             rgb_hz = self.state.stream_hz() if self.state is not None else 0.0
             slam_hz = self.fs_state.stream_hz() if self.fs_state is not None else 0.0
             self._push_timing("rgb_hz", rgb_hz)
@@ -4249,16 +4912,29 @@ class LiveBoxerViewer(OrbitViewer):
             imgui.text(
                 f"Pred FPS: {self._fmt_value_mean30('pred_fps', self._prediction_fps)}"
             )
-            imgui.text(
-                f"Total: {self._fmt_ms_mean30('pred_latency', self._prediction_e2e_ms)}"
-            )
-            imgui.text(
-                f"FSP: {self._fmt_ms_mean30('fsp', self._fs_infer_ms)}  every {self.fsp_every}"
-            )
+            imgui.text(f"FSP: {self._fmt_ms_mean30('fsp', self._fs_infer_ms)}")
             imgui.text(f"OWL: {self._fmt_ms_mean30('owl', self._owl_ms)}")
             imgui.text(f"Boxer: {self._fmt_ms_mean30('boxer', self._boxer_ms)}")
             imgui.text(f"Tracker: {self._fmt_ms_mean30('tracker', self._tracker_ms)}")
             imgui.text(f"Render: {self._fmt_ms_mean30('render', self._render_only_ms)}")
+            imgui.text(
+                f"Total: {self._fmt_ms_mean30('pred_latency', self._prediction_e2e_ms)}"
+            )
+            _, self.thresh2d = labeled_slider_float(
+                "OWL 2D thr", self.thresh2d, 0.0, 1.0
+            )
+            _, self.thresh3d = labeled_slider_float(
+                "Boxer 3D thr", self.thresh3d, 0.0, 1.0
+            )
+            follow_clicked = ui_button(
+                "Follow view" if not self.follow_mode else "Free orbit"
+            )
+            if follow_clicked:
+                self.follow_mode = not self.follow_mode
+                if self.follow_mode:
+                    follow_pose = self._get_follow_pose()
+                    if follow_pose is not None:
+                        self._apply_follow_view(follow_pose)
 
         if ui_section("Advanced Timing"):
             self._push_timing("render_fps", self._fps)
@@ -4308,31 +4984,6 @@ class LiveBoxerViewer(OrbitViewer):
             imgui.text(
                 f"Boxer SDP patches: {self._boxer_sdp_patch_valid}  median depth: {self._boxer_sdp_patch_median:.3f} m"
             )
-        def ui_checkbox(label, value):
-            nonlocal ui_control_active
-            changed, value = imgui.checkbox(label, value)
-            ui_control_active = ui_control_active or bool(changed) or imgui.is_item_active()
-            return changed, value
-
-        def ui_button(label):
-            nonlocal ui_control_active
-            clicked = imgui.button(label)
-            ui_control_active = ui_control_active or bool(clicked) or imgui.is_item_active()
-            return clicked
-
-        def ui_input_text(label, value, buffer_length):
-            nonlocal ui_control_active
-            changed, value = imgui.input_text(label, value, buffer_length)
-            ui_control_active = ui_control_active or bool(changed) or imgui.is_item_active()
-            return changed, value
-
-        def ui_input_text_multiline(label, value, width, height, flags=0):
-            nonlocal ui_control_active
-            changed, value = imgui.input_text_multiline(
-                label, value, width, height, flags
-            )
-            ui_control_active = ui_control_active or bool(changed) or imgui.is_item_active()
-            return changed, value
 
         if ui_section("Enable", default_open=True):
             if self.fs_state is not None:
@@ -4363,8 +5014,14 @@ class LiveBoxerViewer(OrbitViewer):
             _, self.rectify_rgb_for_owl_boxes = ui_checkbox(
                 "Rectify RGB for OWL", self.rectify_rgb_for_owl_boxes
             )
+            _, self.owl_pinhole_focal_scale = labeled_slider_float(
+                "OWL pinhole f x", self.owl_pinhole_focal_scale, 0.25, 4.0, "%.2f"
+            )
             _, self.bb3_use_class_colors = ui_checkbox(
                 "3DBB class/prompt colors", self.bb3_use_class_colors
+            )
+            _, self.use_red_green_confidence = ui_checkbox(
+                "Red<>Green conf", self.use_red_green_confidence
             )
 
         if ui_section("Boxer Model Picker"):
@@ -4418,6 +5075,18 @@ class LiveBoxerViewer(OrbitViewer):
             )
 
         if ui_section("3D View"):
+            _, self.follow_back = labeled_slider_float(
+                "F back", self.follow_back, 0.05, 10.0
+            )
+            _, self.follow_up = labeled_slider_float(
+                "F up", self.follow_up, 0.0, 10.0
+            )
+            _, self.follow_lookahead = labeled_slider_float(
+                "Look", self.follow_lookahead, 0.0, 3.0
+            )
+            _, self.follow_smoothing = labeled_slider_float(
+                "F smooth", self.follow_smoothing, 0.0, 1.0
+            )
             _, self.show_obbs_3d = ui_checkbox("Show 3D OBBs", self.show_obbs_3d)
             _, self.show_raw_by_track_match = ui_checkbox(
                 "Raw->track color", self.show_raw_by_track_match
@@ -4439,6 +5108,9 @@ class LiveBoxerViewer(OrbitViewer):
             _, self.fs_use_depth_colormap = ui_checkbox(
                 "FS jet colors", self.fs_use_depth_colormap
             )
+            _, self.fs_use_rgb_texture_colors = ui_checkbox(
+                "FS RGB colors", self.fs_use_rgb_texture_colors
+            )
             _, self.fs_color_points_by_obb = ui_checkbox(
                 "FS by 3DBB", self.fs_color_points_by_obb
             )
@@ -4448,27 +5120,6 @@ class LiveBoxerViewer(OrbitViewer):
             _, self.fs_point_alpha = labeled_slider_float(
                 "FS pt a", self.fs_point_alpha, 0.05, 1.0
             )
-            follow_clicked = ui_button(
-                "Follow view" if not self.follow_mode else "Free orbit"
-            )
-            if follow_clicked:
-                self.follow_mode = not self.follow_mode
-                if self.follow_mode:
-                    follow_pose = self._get_follow_pose()
-                    if follow_pose is not None:
-                        self._apply_follow_view(follow_pose)
-            _, self.follow_back = labeled_slider_float(
-                "F back", self.follow_back, 0.05, 10.0
-            )
-            _, self.follow_up = labeled_slider_float(
-                "F up", self.follow_up, 0.0, 10.0
-            )
-            _, self.follow_lookahead = labeled_slider_float(
-                "Look", self.follow_lookahead, 0.0, 3.0
-            )
-            _, self.follow_smoothing = labeled_slider_float(
-                "F smooth", self.follow_smoothing, 0.0, 1.0
-            )
 
         if ui_section("Layout"):
             _, self._resize_ui_panel_width = labeled_slider_float(
@@ -4477,6 +5128,11 @@ class LiveBoxerViewer(OrbitViewer):
             _, self._resize_rgb_panel_width = labeled_slider_float(
                 "RGB W", self._resize_rgb_panel_width, 320, 1500, "%.0f"
             )
+            text_scale_changed, self.text_scale = labeled_slider_float(
+                "Text size", self.text_scale, 0.10, 1.15, "%.2f"
+            )
+            if text_scale_changed:
+                self._apply_text_scale()
 
         if ui_section("Recording"):
             if self._recording:
@@ -4489,7 +5145,9 @@ class LiveBoxerViewer(OrbitViewer):
                     self._start_recording()
                 if self._last_record_mp4:
                     imgui.text(f"Saved: {os.path.basename(self._last_record_mp4)}")
-            imgui.text(f"Record FPS: {self._record_fps:.0f}")
+            record_fps = int(round(self._record_fps))
+            _, record_fps = labeled_slider_int("Output FPS", record_fps, 2, 20)
+            self._record_fps = float(record_fps)
         imgui.end()
 
         # Center-left: RGB + 2DBB overlay panel
@@ -4533,16 +5191,18 @@ class LiveBoxerViewer(OrbitViewer):
         prompt_font_size = max(18.0, min(22.0, imgui.get_font_size() * 1.18))
         imgui.push_font(None, prompt_font_size)
         avail_w, avail_h = imgui.get_content_region_available()
+        collection_row_h = max(28.0, imgui.get_text_line_height_with_spacing() * 1.25)
+        row_gap = 8.0
         prompt_h = min(
             max(46.0, imgui.get_text_line_height_with_spacing() * 1.55),
-            max(38.0, float(avail_h) - 18.0),
+            max(38.0, float(avail_h) - collection_row_h - row_gap - 18.0),
         )
-        label_col_w = 216.0
+        label_col_w = 270.0
         button_w = 126.0
         button_gap = 10.0
         status_text = f"{len(self.text_labels)} active"
         status_w = max(150.0, float(imgui.calc_text_size(status_text).x) + 28.0)
-        controls_w = (button_w * 2.0) + (button_gap * 3.0) + status_w + 24.0
+        controls_w = button_gap + status_w + 24.0
         prompt_w = max(160.0, float(avail_w) - label_col_w - controls_w)
         imgui.text("Queries")
         imgui.same_line(label_col_w)
@@ -4552,26 +5212,55 @@ class LiveBoxerViewer(OrbitViewer):
             prompt_w,
             prompt_h,
             imgui.INPUT_TEXT_ENTER_RETURNS_TRUE
-            | imgui.INPUT_TEXT_CTRL_ENTER_FOR_NEW_LINE,
+            | imgui.INPUT_TEXT_CTRL_ENTER_FOR_NEW_LINE
+            | imgui.INPUT_TEXT_NO_HORIZONTAL_SCROLL,
         )
         prompt_active = imgui.is_item_active()
         prompt_enter_pressed = prompt_active and (
             imgui.is_key_pressed(imgui.Key.enter, False)
             or imgui.is_key_pressed(imgui.Key.keypad_enter, False)
         )
-        imgui.same_line(0.0, button_gap)
-        apply_clicked = imgui.button("Apply", button_w, prompt_h)
-        ui_control_active = ui_control_active or bool(apply_clicked) or imgui.is_item_active()
-        if apply_clicked or prompt_submitted or prompt_enter_pressed:
+        if prompt_submitted or prompt_enter_pressed:
             self._apply_prompt_editor()
         imgui.same_line(0.0, button_gap)
-        clear_clicked = imgui.button("Clear", button_w, prompt_h)
+        imgui.text(status_text)
+        imgui.spacing()
+        imgui.text("Collection")
+        imgui.same_line(label_col_w)
+        lvis_count = len(load_text_labels("lvisplus"))
+        cvpr_count = len(load_text_labels("cvpr_demo"))
+        cvpr_label = f"CVPR DEMO({cvpr_count})"
+        lvis_label = f"LVIS({lvis_count})"
+        taxonomy_button_w = max(
+            button_w,
+            float(imgui.calc_text_size(cvpr_label).x) + 28.0,
+            float(imgui.calc_text_size(lvis_label).x) + 28.0,
+        )
+        cvpr_clicked = imgui.button(
+            cvpr_label, taxonomy_button_w, collection_row_h
+        )
+        ui_control_active = ui_control_active or bool(cvpr_clicked) or imgui.is_item_active()
+        if cvpr_clicked:
+            self._apply_prompt_collection("cvpr_demo", "CVPR DEMO")
+        imgui.same_line(0.0, button_gap)
+        lvis_clicked = imgui.button(lvis_label, taxonomy_button_w, collection_row_h)
+        ui_control_active = ui_control_active or bool(lvis_clicked) or imgui.is_item_active()
+        if lvis_clicked:
+            self._apply_prompt_collection("lvisplus", "LVIS")
+        imgui.same_line(0.0, button_gap)
+        apply_clicked = imgui.button("Apply", button_w, collection_row_h)
+        ui_control_active = ui_control_active or bool(apply_clicked) or imgui.is_item_active()
+        if apply_clicked:
+            self._apply_prompt_editor()
+        imgui.same_line(0.0, button_gap)
+        clear_clicked = imgui.button("Clear", button_w, collection_row_h)
         ui_control_active = ui_control_active or bool(clear_clicked) or imgui.is_item_active()
         if clear_clicked:
             self.prompt_editor_text = ""
             self._apply_prompt_editor()
         imgui.same_line(0.0, button_gap)
-        imgui.text(status_text)
+        if self.prompt_collection_name:
+            imgui.text(self.prompt_collection_name)
         imgui.pop_font()
         imgui.end()
 
@@ -4594,11 +5283,13 @@ class LiveBoxerViewer(OrbitViewer):
             self.rgb_panel_width = float(self._resize_rgb_panel_width)
             self.viz_panel_width = float(self._resize_viz_panel_width)
             self._clamp_panel_widths()
+            self._save_preferences()
         elif not self._resize_drag_active:
             self.ui_panel_width = float(self._resize_ui_panel_width)
             self.rgb_panel_width = float(self._resize_rgb_panel_width)
             self.viz_panel_width = float(self._resize_viz_panel_width)
             self._clamp_panel_widths()
+            self._save_preferences()
         self._ui_interaction_active = bool(ui_control_active or self._imgui_ui_busy())
 
     def on_key_event(self, key, action, modifiers):
@@ -4651,7 +5342,14 @@ class LiveFoundationStereoViewer(OrbitViewer):
                 uniform float alpha;
                 out vec4 f_color;
                 void main() {
-                    f_color = vec4(v_color, alpha);
+                    vec2 point_uv = gl_PointCoord * 2.0 - 1.0;
+                    float radius = length(point_uv);
+                    float edge_width = max(fwidth(radius), 0.001);
+                    float point_alpha = 1.0 - smoothstep(1.0 - edge_width, 1.0, radius);
+                    if (point_alpha <= 0.0) {
+                        discard;
+                    }
+                    f_color = vec4(v_color, alpha * point_alpha);
                 }
             """,
         )
@@ -5181,7 +5879,7 @@ class LiveFoundationStereoViewer(OrbitViewer):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--profile_name", type=str, default="profile10")
+    p.add_argument("--profile_name", type=str, default="mp_streaming_demo")
     p.add_argument("--wifi", action="store_true")
     p.add_argument("--ip", type=str, default=None)
     p.add_argument("--serial", type=str, default=None)
@@ -5220,7 +5918,7 @@ def parse_args():
         "--record_fps",
         type=float,
         default=5.0,
-        help="FPS used when encoding UI video recordings.",
+        help="FPS used when encoding UI video recordings (clamped to 2-20).",
     )
     p.add_argument(
         "--ui_capture",
@@ -5243,6 +5941,12 @@ def parse_args():
         "--rectify",
         action="store_true",
         help="Rectify RGB fisheye to pinhole before OWL, then map 2D boxes back to fisheye before Boxer.",
+    )
+    p.add_argument(
+        "--owl_pinhole_focal_scale",
+        type=float,
+        default=1.20,
+        help="Focal multiplier for the OWL pinhole rectification warp.",
     )
     p.add_argument("--image_hw", type=int, default=None)
     p.add_argument(
@@ -5289,6 +5993,11 @@ def parse_args():
     )
     p.add_argument(
         "--fs_point_stride", type=int, default=2
+    )
+    p.add_argument(
+        "--no_fs_rgb_texture_colors",
+        action="store_true",
+        help="Disable default RGB-textured coloring for FoundationStereo 3D points.",
     )
     p.add_argument(
         "--fsp_every",
@@ -5443,6 +6152,7 @@ def main():
         LiveBoxerViewer.initial_prompts_csv = ",".join(text_labels)
         LiveBoxerViewer.HW = int(args.image_hw) if args.image_hw is not None else 960
         LiveBoxerViewer.detector_hw = int(args.detector_hw)
+        LiveBoxerViewer.owl_pinhole_focal_scale = float(args.owl_pinhole_focal_scale)
         LiveBoxerViewer.init_thresh3d = float(args.thresh3d)
         LiveBoxerViewer.dev = "cpu"
         LiveBoxerViewer.pdtype = torch.float32
@@ -5459,6 +6169,7 @@ def main():
         LiveBoxerViewer.enable_owl = False
         LiveBoxerViewer.enable_boxer = False
         LiveBoxerViewer.enable_tracker = False
+        _apply_live_boxer_window_preferences(LiveBoxerViewer)
         print("==> Launching UI capture mock viewer.", flush=True)
         launch_viewer(LiveBoxerViewer)
         return
@@ -5569,6 +6280,8 @@ def main():
         else:
             rx.register_vio_callback(vio_cb)
         rx.register_rgb_callback(rgb_cb)
+    stderr_filter = _NativeStderrFilter()
+    stderr_filter.start()
     rx.start_server()
 
     try:
@@ -5687,6 +6400,7 @@ def main():
         LiveBoxerViewer.HW = HW
         LiveBoxerViewer.detector_hw = args.detector_hw
         LiveBoxerViewer.rectify_rgb_for_owl_boxes = bool(args.rectify)
+        LiveBoxerViewer.owl_pinhole_focal_scale = float(args.owl_pinhole_focal_scale)
         LiveBoxerViewer.init_thresh3d = args.thresh3d
         LiveBoxerViewer.dev = dev
         LiveBoxerViewer.pdtype = pdtype
@@ -5711,17 +6425,22 @@ def main():
         LiveBoxerViewer.fs_disparity_median = max(0, int(args.fs_disparity_median))
         LiveBoxerViewer.fs_point_stride = int(args.fs_point_stride)
         LiveBoxerViewer.fs_max_depth = float(args.fs_max_depth)
+        LiveBoxerViewer.fs_use_rgb_texture_colors = not bool(
+            args.no_fs_rgb_texture_colors
+        )
         if args.fs or args.owl or args.boxer or args.tracker:
             LiveBoxerViewer.enable_foundation_stereo = bool(args.fs)
             LiveBoxerViewer.enable_tracker = bool(args.tracker)
             LiveBoxerViewer.enable_boxer = bool(args.boxer or args.tracker)
             LiveBoxerViewer.enable_owl = bool(args.owl or args.boxer or args.tracker)
 
+        _apply_live_boxer_window_preferences(LiveBoxerViewer)
         print("==> Launching viewer.")
         launch_viewer(LiveBoxerViewer)
     finally:
         device.stop_streaming()
         rx.stop_server()
+        stderr_filter.stop()
 
 
 if __name__ == "__main__":

@@ -457,9 +457,9 @@ class OwlWrapper(nn.Module):
         y2 = (cy + h / 2) * HH
         boxes = torch.stack([x1, y1, x2, y2], dim=-1)
 
-        # Filter out very large or small boxes (false positives)
+        # Filter out very large or tiny boxes (false positives)
         too_big = (x2 - x1 > 0.9 * WW) | (y2 - y1 > 0.9 * HH)
-        too_small = (x2 - x1 < 0.05 * WW) | (y2 - y1 < 0.05 * HH)
+        too_small = (x2 - x1 < 0.025 * WW) | (y2 - y1 < 0.025 * HH)
         keep = ~(too_big | too_small)
         boxes = boxes[keep]
         scores = scores[keep]

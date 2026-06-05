@@ -49,6 +49,9 @@ COLOR_WINDOW_BG = int(_imgui.Col_.window_bg)
 # Input text flags
 INPUT_TEXT_ENTER_RETURNS_TRUE = int(_imgui.InputTextFlags_.enter_returns_true)
 INPUT_TEXT_CTRL_ENTER_FOR_NEW_LINE = int(_imgui.InputTextFlags_.ctrl_enter_for_new_line)
+INPUT_TEXT_NO_HORIZONTAL_SCROLL = int(
+    getattr(_imgui.InputTextFlags_, "no_horizontal_scroll", 0)
+)
 
 # Hovered flags
 HOVERED_ALLOW_WHEN_DISABLED = int(_imgui.HoveredFlags_.allow_when_disabled)

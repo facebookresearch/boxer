@@ -215,6 +215,71 @@ class AleHead(torch.nn.Module):
         return batch, output
 
 
+class AleHead10(torch.nn.Module):
+    """Aleatoric uncertainty head with full 9-DoF box pose.
+
+    Predicts 10 params per query: 3 translation, 3 size, and quaternion wxyz.
+    """
+
+    def __init__(self, in_dim, out_dim=10, hidden_dim=128, num_layers=2):
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.bbox_min = 0.02
+        self.bbox_max = 4.0
+        layers = [nn.Linear(in_dim, hidden_dim), nn.ReLU()]
+        for _ in range(num_layers - 1):
+            layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.ReLU()])
+        self.net = nn.Sequential(*layers)
+        self.mean_head = nn.Linear(hidden_dim, out_dim)
+        self.logvar_head = nn.Linear(hidden_dim, 1)
+
+    def forward(self, batch, output):
+        query = output["query"]
+
+        h = self.net(query)
+        params_v = self.mean_head(h)
+        logvar = torch.clamp(self.logvar_head(h), -10, +3)
+
+        B, M = params_v.shape[0], params_v.shape[1]
+        device = params_v.device
+        center_v = params_v[..., :3]
+
+        size = (
+            torch.sigmoid(params_v[..., 3:6]) * (self.bbox_max - self.bbox_min)
+            + self.bbox_min
+        )
+        bb3 = torch.zeros((B, M, 6), device=device)
+        hh, ww, dd = size[..., 0], size[..., 1], size[..., 2]
+        bb3[..., 0] = -(hh / 2)
+        bb3[..., 1] = hh / 2
+        bb3[..., 2] = -(ww / 2)
+        bb3[..., 3] = ww / 2
+        bb3[..., 4] = -(dd / 2)
+        bb3[..., 5] = dd / 2
+
+        quat = torch.nn.functional.normalize(params_v[..., 6:10], p=2, dim=-1)
+        T_vo = PoseTW.from_qt(quat, center_v)
+
+        sigma2 = torch.exp(logvar)
+        prob = 1.0 / (1.0 + sigma2)
+
+        inst_id = torch.arange(M, device=device).reshape(1, M, -1).repeat(B, 1, 1)
+        sem_id = 32 + torch.zeros((B, M, 1), device=device)
+        obb_pr_v = ObbTW.from_lmc(
+            bb3_object=bb3,
+            T_world_object=T_vo,
+            prob=prob,
+            inst_id=inst_id,
+            sem_id=sem_id,
+        )
+        T_wv = batch["T_world_voxel0"].unsqueeze(1)
+        output["obbs_pr_w"] = obb_pr_v.transform(T_wv)
+        output["obbs_pr_params"] = params_v
+        output["obbs_pr_logvar"] = logvar
+        return batch, output
+
+
 def image_to_patches(x, patch_size=14):
     """
     Args:
@@ -560,7 +625,20 @@ class BoxerNet(nn.Module):
 
         self.query_dim = 4  # (xmin, xmin, ymin, ymax)
 
-        self.head = AleHead(self.dim, 7, norm_chamfer=cfg["norm_chamfer"])
+        self.head_type = str(cfg.get("head_type", "ale")).lower()
+        if self.head_type == "ale10":
+            self.head = AleHead10(
+                self.dim,
+                10,
+                hidden_dim=int(cfg.get("head_hidden_dim", 128)),
+                num_layers=int(cfg.get("head_num_layers", 2)),
+            )
+        else:
+            self.head = AleHead(
+                self.dim,
+                7,
+                norm_chamfer=bool(cfg.get("norm_chamfer", False)),
+            )
 
         self.input2emb = torch.nn.Linear(self.in_dim, self.dim)
         self.query2emb = torch.nn.Linear(self.query_dim, self.dim)
@@ -586,7 +664,11 @@ class BoxerNet(nn.Module):
         cfg = ckpt["cfg"]
         hw = cfg["dataset"]["image_hw"]
 
-        model = cls(cfg["model"])
+        model_cfg = dict(cfg["model"])
+        head_weight = ckpt["model"].get("head.mean_head.weight")
+        if head_weight is not None and tuple(head_weight.shape[:1]) == (10,):
+            model_cfg["head_type"] = "ale10"
+        model = cls(model_cfg)
         model_dict = model.state_dict()
         new_ckpt_dict = smart_load(model_dict, ckpt["model"])
         model.load_state_dict(new_ckpt_dict, strict=False)

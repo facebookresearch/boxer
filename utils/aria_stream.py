@@ -395,12 +395,7 @@ def make_callbacks(state: StreamState):
     def rgb_cb(image_data: ImageData, image_record: ImageDataRecord):
         try:
             arr = image_data.to_numpy_array()
-        except RuntimeError as exc:
-            now = time.time()
-            last_warn = getattr(rgb_cb, "_last_decode_warn", 0.0)
-            if now - last_warn > 2.0:
-                print(f"==> Skipping undecodable RGB frame: {exc}", flush=True)
-                rgb_cb._last_decode_warn = now
+        except RuntimeError:
             return
         ts_ns = int(image_record.capture_timestamp_ns)
         with state.lock:
