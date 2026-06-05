@@ -268,6 +268,11 @@ def red_green_colors_bgr(scores):
     ]
 
 
+def rescale_boxer_confidence(scores: torch.Tensor) -> torch.Tensor:
+    """Map Boxer confidence from its common [0.5, 1.0] range to [0.0, 1.0]."""
+    return ((scores.float() - 0.5) * 2.0).clamp(0.0, 1.0)
+
+
 SALIENT_CLASS_RGB = [
     (0.92, 0.12, 0.16),  # red
     (0.10, 0.45, 0.98),  # blue
@@ -1466,7 +1471,8 @@ def run_inference(
             sem_ids[i] = sem_name_to_id[lab]
         obb_pr_w.set_sem_id(sem_ids)
 
-        all_scores = obb_pr_w.prob.squeeze(-1).clone()
+        all_scores = rescale_boxer_confidence(obb_pr_w.prob.squeeze(-1))
+        obb_pr_w.set_prob(all_scores, use_mask=False)
         keepers = all_scores >= thresh3d
         obb_pr_w = obb_pr_w[keepers].clone()
         scores3d = all_scores[keepers]
@@ -1695,6 +1701,7 @@ class LiveBoxerViewer(OrbitViewer):
     show_obbs_3d: bool = True
     show_frustum: bool = True
     show_world_axes: bool = True
+    show_floor_grid: bool = True
     use_red_green_confidence: bool = True
     show_rgb_fs_points: bool = False
     show_rgb_fs: bool = False
@@ -1716,6 +1723,9 @@ class LiveBoxerViewer(OrbitViewer):
     prompt_bar_height = 150.0
     text_scale = 0.90
     frustum_scale = 0.12
+    floor_grid_height: float = -2.0
+    floor_grid_size: float = 6.0
+    floor_grid_line_width: float = 1.0
     initial_prompts_csv: str = ""
 
     def init_scene(self) -> None:
@@ -1874,6 +1884,8 @@ class LiveBoxerViewer(OrbitViewer):
         self._fs_target_inited = False
         self._fs_pose_tail: list[tuple[int, np.ndarray]] = []
         self._last_T_world_rgb_cam: Optional[np.ndarray] = None
+        self._floor_grid_settings_key: Optional[tuple[float, float]] = None
+        self._floor_grid_world_anchor: Optional[np.ndarray] = None
         self._fs_last_T_world_device: Optional[np.ndarray] = None
         self._fs_last_T_world_rect: Optional[np.ndarray] = None
         self._fs_debug_last_print = 0
@@ -1950,6 +1962,7 @@ class LiveBoxerViewer(OrbitViewer):
         self.show_obbs_3d = bool(type(self).show_obbs_3d)
         self.show_frustum = bool(type(self).show_frustum)
         self.show_world_axes = bool(type(self).show_world_axes)
+        self.show_floor_grid = bool(type(self).show_floor_grid)
         self.use_red_green_confidence = bool(type(self).use_red_green_confidence)
         self.enable_owl = bool(type(self).enable_owl)
         self.enable_boxer = bool(type(self).enable_boxer)
@@ -1989,6 +2002,12 @@ class LiveBoxerViewer(OrbitViewer):
         self.axis_line_width = 5.0
         self.axis_length = 0.5
         self.axis_z_offset = -2.0
+        self.floor_grid_height = float(type(self).floor_grid_height)
+        self.floor_grid_size = float(type(self).floor_grid_size)
+        self.floor_grid_line_width = float(type(self).floor_grid_line_width)
+        self._floor_grid_vbo: Optional[moderngl.Buffer] = None
+        self._floor_grid_vao: Optional[moderngl.VertexArray] = None
+        self._floor_grid_count = 0
         self._apply_ui_preferences()
         self.tracker.conf_threshold = float(self.thresh3d)
         self._last_saved_preferences_key = self._current_preferences_key()
@@ -1998,6 +2017,9 @@ class LiveBoxerViewer(OrbitViewer):
         self.camera_azimuth = -90.0
         self.camera_elevation = 20.0
         self.camera_target = np.array([0.0, 0.0, 0.0], dtype="f4")
+        self._follow_eye: Optional[np.ndarray] = None
+        self._follow_target: Optional[np.ndarray] = None
+        self._follow_up: Optional[np.ndarray] = None
         self._rebuild_world_axes(self.camera_target)
 
         if self.enable_foundation_stereo and self.fs_state is not None:
@@ -2250,7 +2272,7 @@ class LiveBoxerViewer(OrbitViewer):
         if not isinstance(ui, dict):
             return
 
-        self.thresh2d = self._pref_float(ui, "thresh2d", self.thresh2d, 0.0, 1.0)
+        self.thresh2d = self._pref_float(ui, "thresh2d", self.thresh2d, 0.0, 0.5)
         self.thresh3d = self._pref_float(ui, "thresh3d", self.thresh3d, 0.0, 1.0)
         self.owl_nms_iou = self._pref_float(ui, "owl_nms_iou", self.owl_nms_iou, 0.05, 1.0)
         self.enable_foundation_stereo = self._pref_bool(
@@ -2309,11 +2331,26 @@ class LiveBoxerViewer(OrbitViewer):
             ui, "show_track_assoc_lines", self.show_track_assoc_lines
         )
         self.line_width = self._pref_float(ui, "line_width", self.line_width, 1.0, 10.0)
+        self.frustum_scale = self._pref_float(
+            ui, "frustum_scale", self.frustum_scale, 0.03, 1.0
+        )
         self.tracker_line_width = self._pref_float(
             ui, "tracker_line_width", self.tracker_line_width, 2.0, 16.0
         )
         self.show_frustum = self._pref_bool(ui, "show_frustum", self.show_frustum)
         self.show_world_axes = self._pref_bool(ui, "show_world_axes", self.show_world_axes)
+        self.show_floor_grid = self._pref_bool(
+            ui, "show_floor_grid", self.show_floor_grid
+        )
+        self.floor_grid_height = self._pref_float(
+            ui, "floor_grid_height", self.floor_grid_height, -5.0, 1.0
+        )
+        self.floor_grid_size = self._pref_float(
+            ui, "floor_grid_size", self.floor_grid_size, 0.5, 20.0
+        )
+        self.floor_grid_line_width = self._pref_float(
+            ui, "floor_grid_line_width", self.floor_grid_line_width, 0.5, 8.0
+        )
         self.show_fs_points = self._pref_bool(ui, "show_fs_points", self.show_fs_points)
         self.fs_use_depth_colormap = self._pref_bool(
             ui, "fs_use_depth_colormap", self.fs_use_depth_colormap
@@ -2342,24 +2379,6 @@ class LiveBoxerViewer(OrbitViewer):
             if prompt_text.strip():
                 self._apply_prompt_editor()
 
-        ckpt_path = self._pref_str(ui, "current_boxernet_ckpt", self.current_boxernet_ckpt)
-        if ckpt_path:
-            ckpt_abs = os.path.abspath(os.path.expanduser(ckpt_path))
-            current_abs = os.path.abspath(os.path.expanduser(self.current_boxernet_ckpt))
-            if ckpt_abs != current_abs and os.path.exists(ckpt_abs):
-                self._reload_boxernet_checkpoint(ckpt_abs)
-            ckpt_abs_list = [
-                os.path.abspath(os.path.expanduser(path)) for path in self.boxernet_ckpts
-            ]
-            if ckpt_abs in ckpt_abs_list:
-                self.boxernet_ckpt_index = ckpt_abs_list.index(ckpt_abs)
-        self.boxernet_ckpt_index = self._pref_int(
-            ui,
-            "boxernet_ckpt_index",
-            self.boxernet_ckpt_index,
-            0,
-            max(0, len(self.boxernet_ckpts) - 1),
-        )
         self.prompt_collection_name = self._pref_str(
             ui, "prompt_collection_name", self.prompt_collection_name
         )
@@ -2401,9 +2420,14 @@ class LiveBoxerViewer(OrbitViewer):
             "show_raw_by_track_match": bool(self.show_raw_by_track_match),
             "show_track_assoc_lines": bool(self.show_track_assoc_lines),
             "line_width": float(round(self.line_width, 4)),
+            "frustum_scale": float(round(self.frustum_scale, 4)),
             "tracker_line_width": float(round(self.tracker_line_width, 4)),
             "show_frustum": bool(self.show_frustum),
             "show_world_axes": bool(self.show_world_axes),
+            "show_floor_grid": bool(self.show_floor_grid),
+            "floor_grid_height": float(round(self.floor_grid_height, 4)),
+            "floor_grid_size": float(round(self.floor_grid_size, 4)),
+            "floor_grid_line_width": float(round(self.floor_grid_line_width, 4)),
             "show_fs_points": bool(self.show_fs_points),
             "fs_use_depth_colormap": bool(self.fs_use_depth_colormap),
             "fs_use_rgb_texture_colors": bool(self.fs_use_rgb_texture_colors),
@@ -2450,6 +2474,39 @@ class LiveBoxerViewer(OrbitViewer):
         vw, vh = self._get_3d_viewport_size()
         aspect_ratio = vw / max(1, vh)
         projection = _perspective_projection(45.0, aspect_ratio, 0.05, 200.0)
+        if (
+            self.follow_mode
+            and self._follow_eye is not None
+            and self._follow_target is not None
+            and self._follow_up is not None
+        ):
+            follow_eye = np.asarray(self._follow_eye, dtype=np.float32)
+            follow_target = np.asarray(self._follow_target, dtype=np.float32)
+            follow_dir = follow_target - follow_eye
+            follow_dir_norm = float(np.linalg.norm(follow_dir))
+            if follow_dir_norm < 1e-6:
+                follow_dir = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+            else:
+                follow_dir = follow_dir / follow_dir_norm
+            follow_up = np.asarray(self._follow_up, dtype=np.float32)
+            follow_up = follow_up - follow_dir * float(np.dot(follow_up, follow_dir))
+            follow_up_norm = float(np.linalg.norm(follow_up))
+            if follow_up_norm < 1e-6:
+                fallback = (
+                    np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                    if abs(float(follow_dir[0])) < 0.9
+                    else np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                )
+                follow_up = fallback - follow_dir * float(np.dot(fallback, follow_dir))
+                follow_up_norm = float(np.linalg.norm(follow_up))
+            follow_up = follow_up / max(follow_up_norm, 1e-6)
+            view = _look_at(
+                tuple(follow_eye),
+                tuple(follow_target),
+                tuple(follow_up),
+            )
+            mvp = np.eye(4, dtype="f4") @ view @ projection
+            return projection, view, mvp
         azimuth_rad = np.radians(self.camera_azimuth)
         elevation_rad = np.radians(self.camera_elevation)
         cx = self.camera_distance * np.cos(elevation_rad) * np.cos(azimuth_rad)
@@ -3263,24 +3320,19 @@ class LiveBoxerViewer(OrbitViewer):
                 "_match_line", np.asarray(matched_lines, dtype=np.float32)
             )
 
-    def _rebuild_frustum(self, cam: CameraTW, T_wr: PoseTW) -> None:
-        if self._frustum_vbo is not None:
-            self._frustum_vbo.release()
-            self._frustum_vbo = None
-        if self._frustum_vao is not None:
-            self._frustum_vao.release()
-            self._frustum_vao = None
-        self._frustum_count = 0
-
-        T_wc = T_wr @ cam.T_camera_rig.inverse()
-        origin = T_wc.t.reshape(3).cpu().float()
-        fx = cam.f[..., 0].item()
-        fy = cam.f[..., 1].item()
-        w_img = cam.size[..., 0].item()
-        h_img = cam.size[..., 1].item()
-        cx = cam.c[..., 0].item()
-        cy = cam.c[..., 1].item()
-        d = self.frustum_scale
+    def _frustum_segments_from_pose(
+        self,
+        origin: torch.Tensor,
+        R_wc: torch.Tensor,
+        fx: float,
+        fy: float,
+        cx: float,
+        cy: float,
+        w_img: float,
+        h_img: float,
+        color: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        d = float(self.frustum_scale)
         pts_cam = torch.tensor(
             [
                 [(0.0 - cx) / fx * d, (0.0 - cy) / fy * d, d],
@@ -3290,32 +3342,154 @@ class LiveBoxerViewer(OrbitViewer):
             ],
             dtype=torch.float32,
         )
-        R_wc = T_wc.R.reshape(3, 3).cpu().float()
         pts_world = (R_wc @ pts_cam.T).T + origin
-        color = torch.tensor([1.0, 0.85, 0.1], dtype=torch.float32)
         segs = []
         for i in range(4):
             segs.append(torch.cat([origin, pts_world[i], color, torch.ones(1)]))
         for i in range(4):
             j = (i + 1) % 4
             segs.append(torch.cat([pts_world[i], pts_world[j], color, torch.ones(1)]))
-        data = torch.stack(segs).numpy().astype("f4")
-        self._frustum_count = len(data)
-        self._frustum_vbo = self.ctx.buffer(data.tobytes())
-        self._frustum_vao = self.ctx.vertex_array(
-            self.line_prog,
-            [
-                (self.quad_vbo, "2f", "in_quad_pos"),
-                (
-                    self._frustum_vbo,
-                    "3f 3f 3f 1f /i",
-                    "start_pos",
-                    "end_pos",
-                    "line_color",
-                    "line_prob",
-                ),
-            ],
+        return segs
+
+    def _frustum_segments_from_calib(
+        self,
+        calib,
+        T_world_device: np.ndarray,
+        color: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        T_device_cam = np.asarray(
+            calib.get_transform_device_camera().to_matrix(), dtype=np.float32
         )
+        T_world_cam = np.asarray(T_world_device, dtype=np.float32) @ T_device_cam
+        origin = torch.from_numpy(T_world_cam[:3, 3].astype(np.float32))
+        R_wc = torch.from_numpy(T_world_cam[:3, :3].astype(np.float32))
+        params = list(calib.get_projection_params())
+        f = float(params[0])
+        cx = float(params[1])
+        cy = float(params[2])
+        w_img, h_img = calib.get_image_size()
+        return self._frustum_segments_from_pose(
+            origin,
+            R_wc,
+            f,
+            f,
+            cx,
+            cy,
+            float(w_img),
+            float(h_img),
+            color,
+        )
+
+    def _rebuild_frustum(self, cam: CameraTW, T_wr: PoseTW) -> None:
+        white = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
+        T_wc = T_wr @ cam.T_camera_rig.inverse()
+        origin = T_wc.t.reshape(3).cpu().float()
+        R_wc = T_wc.R.reshape(3, 3).cpu().float()
+        segs = self._frustum_segments_from_pose(
+            origin,
+            R_wc,
+            float(cam.f[..., 0].item()),
+            float(cam.f[..., 1].item()),
+            float(cam.c[..., 0].item()),
+            float(cam.c[..., 1].item()),
+            float(cam.size[..., 0].item()),
+            float(cam.size[..., 1].item()),
+            white,
+        )
+
+        if self.fs_state is not None:
+            _left_frame, _right_frame, left_calib, right_calib, _T_world_device = (
+                self.fs_state.snapshot()
+            )
+            T_world_rig = (
+                T_wr.matrix.detach().cpu().numpy().astype(np.float32)
+            )
+            if left_calib is not None:
+                segs.extend(
+                    self._frustum_segments_from_calib(
+                        left_calib,
+                        T_world_rig,
+                        white,
+                    )
+                )
+            if right_calib is not None:
+                segs.extend(
+                    self._frustum_segments_from_calib(
+                        right_calib,
+                        T_world_rig,
+                        white,
+                    )
+                )
+
+        data = torch.stack(segs).numpy().astype("f4") if segs else np.zeros((0, 10), dtype=np.float32)
+        self._upload_line_data("_frustum", data)
+        if self._floor_grid_world_anchor is None:
+            self._rebuild_floor_grid(origin.numpy().astype(np.float32))
+
+    def _rebuild_floor_grid(self, anchor_origin: np.ndarray) -> None:
+        if self._floor_grid_world_anchor is None:
+            self._floor_grid_world_anchor = np.asarray(
+                anchor_origin, dtype=np.float32
+            ).reshape(3).copy()
+        origin = np.asarray(self._floor_grid_world_anchor, dtype=np.float32).reshape(3)
+        self._floor_grid_settings_key = (
+            round(float(self.floor_grid_height), 4),
+            round(float(self.floor_grid_size), 4),
+        )
+        size = max(0.5, float(self.floor_grid_size))
+        half = size * 0.5
+        z = float(origin[2]) + float(self.floor_grid_height)
+        center_x = float(origin[0])
+        center_y = float(origin[1])
+        divisions = int(np.clip(round(size), 2, 40))
+        coords = np.linspace(-half, half, divisions + 1, dtype=np.float32)
+        minor = np.array([0.34, 0.34, 0.34], dtype=np.float32)
+        major = np.array([0.52, 0.52, 0.52], dtype=np.float32)
+        lines = []
+        for i, offset in enumerate(coords):
+            color = major if i == divisions // 2 else minor
+            x = center_x + float(offset)
+            y = center_y + float(offset)
+            lines.append(
+                np.concatenate(
+                    [
+                        np.array([x, center_y - half, z], dtype=np.float32),
+                        np.array([x, center_y + half, z], dtype=np.float32),
+                        color,
+                        np.array([1.0], dtype=np.float32),
+                    ]
+                )
+            )
+            lines.append(
+                np.concatenate(
+                    [
+                        np.array([center_x - half, y, z], dtype=np.float32),
+                        np.array([center_x + half, y, z], dtype=np.float32),
+                        color,
+                        np.array([1.0], dtype=np.float32),
+                    ]
+                )
+            )
+        self._upload_line_data(
+            "_floor_grid", np.asarray(lines, dtype=np.float32)
+        )
+
+    def _maybe_rebuild_floor_grid_for_ui(self) -> None:
+        current_key = (
+            round(float(self.floor_grid_height), 4),
+            round(float(self.floor_grid_size), 4),
+        )
+        if current_key == self._floor_grid_settings_key:
+            return
+        if self._floor_grid_world_anchor is None:
+            if self._last_T_world_rgb_cam is None:
+                return
+            self._floor_grid_world_anchor = np.asarray(
+                self._last_T_world_rgb_cam[:3, 3], dtype=np.float32
+            ).copy()
+        if self._floor_grid_world_anchor is None:
+            return
+        self._rebuild_floor_grid(self._floor_grid_world_anchor)
 
     def _rebuild_world_axes(self, origin_np: np.ndarray) -> None:
         if self._axis_vbo is not None:
@@ -3416,6 +3590,20 @@ class LiveBoxerViewer(OrbitViewer):
             return np.stack([vals, vals, vals], axis=1).astype("f4")
         return sampled[:, :3].astype(np.float32) / 255.0
 
+    @staticmethod
+    def _make_fs_rgb_point_colors_richer(colors: np.ndarray) -> np.ndarray:
+        colors = np.asarray(colors, dtype=np.float32)
+        if colors.size == 0:
+            return colors.astype("f4")
+        luminance = (
+            colors[:, 0:1] * 0.2126
+            + colors[:, 1:2] * 0.7152
+            + colors[:, 2:3] * 0.0722
+        )
+        colors = luminance + (colors - luminance) * 1.65
+        colors = (colors - 0.45) * 1.12 + 0.45
+        return np.clip(colors, 0.0, 1.0).astype("f4")
+
     def _rgb_texture_colors_for_fs_points(
         self,
         pts_world_raw: np.ndarray,
@@ -3427,6 +3615,7 @@ class LiveBoxerViewer(OrbitViewer):
         colors = self._sample_rectified_image_colors(fallback_image, fallback_valid_mask)
 
         def finish(out_colors: np.ndarray) -> np.ndarray:
+            out_colors = self._make_fs_rgb_point_colors_richer(out_colors)
             if pts_world_view is not None:
                 out_colors = self._color_fs_points_from_obbs(
                     pts_world_view.astype(np.float32), out_colors, blend=obb_blend
@@ -3739,43 +3928,89 @@ class LiveBoxerViewer(OrbitViewer):
         origin_world = np.asarray(T_world_camera[:3, 3], dtype=np.float32)
         R_world_camera = np.asarray(T_world_camera[:3, :3], dtype=np.float32)
         forward_world = R_world_camera @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        forward_norm = float(np.linalg.norm(forward_world))
-        if forward_norm > 1e-6:
-            forward_world = forward_world / forward_norm
+        yaw_forward = np.array(
+            [forward_world[0], forward_world[1], 0.0], dtype=np.float32
+        )
+        yaw_norm = float(np.linalg.norm(yaw_forward))
+        if yaw_norm <= 1e-6:
+            if self._follow_eye is not None and self._follow_target is not None:
+                prev_forward = np.asarray(self._follow_target, dtype=np.float32) - np.asarray(
+                    self._follow_eye, dtype=np.float32
+                )
+                yaw_forward = np.array(
+                    [prev_forward[0], prev_forward[1], 0.0], dtype=np.float32
+                )
+                yaw_norm = float(np.linalg.norm(yaw_forward))
+            if yaw_norm <= 1e-6:
+                yaw_forward = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                yaw_norm = 1.0
+        forward_world = yaw_forward / yaw_norm
         up_world = np.array([0.0, 0.0, 1.0], dtype=np.float32)
 
-        camera_world = (
+        desired_eye = (
             origin_world
             - forward_world * float(self.follow_back)
             + up_world * float(self.follow_up)
+        ).astype("f4")
+        desired_target = (
+            origin_world + forward_world * float(self.follow_lookahead)
+        ).astype("f4")
+        desired_up = up_world.astype("f4")
+
+        if float(np.linalg.norm(desired_eye - desired_target)) < 1e-5:
+            return
+
+        blend = float(np.clip(self.follow_smoothing, 0.0, 1.0))
+        if (
+            blend <= 0.0
+            or self._follow_eye is None
+            or self._follow_target is None
+            or self._follow_up is None
+        ):
+            self._follow_eye = desired_eye
+            self._follow_target = desired_target
+            self._follow_up = desired_up
+        else:
+            self._follow_eye = (
+                (1.0 - blend) * self._follow_eye + blend * desired_eye
+            ).astype("f4")
+            self._follow_target = (
+                (1.0 - blend) * self._follow_target + blend * desired_target
+            ).astype("f4")
+            mixed_up = (1.0 - blend) * self._follow_up + blend * desired_up
+            mixed_up_norm = float(np.linalg.norm(mixed_up))
+            self._follow_up = (
+                mixed_up / mixed_up_norm if mixed_up_norm > 1e-6 else desired_up
+            ).astype("f4")
+
+        self._seed_orbit_from_eye_target(
+            np.asarray(self._follow_eye, dtype=np.float32),
+            np.asarray(self._follow_target, dtype=np.float32),
         )
-        target_world = origin_world + forward_world * float(self.follow_lookahead)
-        target_view = target_world.astype("f4")
-        camera_view = camera_world.astype("f4")
-        delta = camera_view - target_view
+
+    def _seed_orbit_from_eye_target(
+        self, eye: np.ndarray, target: np.ndarray
+    ) -> None:
+        delta = np.asarray(eye, dtype=np.float32) - np.asarray(
+            target, dtype=np.float32
+        )
         dist = float(np.linalg.norm(delta))
         if dist < 1e-5:
             return
-
-        azimuth = float(np.degrees(np.arctan2(delta[1], delta[0])))
-        elevation = float(np.degrees(np.arcsin(np.clip(delta[2] / dist, -1.0, 1.0))))
-
-        blend = float(np.clip(self.follow_smoothing, 0.0, 1.0))
-        if blend <= 0.0:
-            self.camera_target = target_view
-            self.camera_distance = dist
-            self.camera_azimuth = azimuth
-            self.camera_elevation = elevation
-            return
-
-        self.camera_target = (
-            (1.0 - blend) * self.camera_target + blend * target_view
-        ).astype("f4")
-        self.camera_distance = (1.0 - blend) * float(self.camera_distance) + blend * dist
-        self.camera_azimuth = (1.0 - blend) * float(self.camera_azimuth) + blend * azimuth
-        self.camera_elevation = (
-            (1.0 - blend) * float(self.camera_elevation) + blend * elevation
+        self.camera_target = np.asarray(target, dtype=np.float32).astype("f4")
+        self.camera_distance = dist
+        self.camera_azimuth = float(np.degrees(np.arctan2(delta[1], delta[0])))
+        self.camera_elevation = float(
+            np.degrees(np.arcsin(np.clip(delta[2] / dist, -1.0, 1.0)))
         )
+
+    def _exit_follow_mode(self) -> None:
+        if self._follow_eye is not None and self._follow_target is not None:
+            self._seed_orbit_from_eye_target(
+                np.asarray(self._follow_eye, dtype=np.float32),
+                np.asarray(self._follow_target, dtype=np.float32),
+            )
+        self.follow_mode = False
 
     def _get_follow_pose(self) -> Optional[np.ndarray]:
         if self._last_T_world_rgb_cam is not None:
@@ -3812,11 +4047,8 @@ class LiveBoxerViewer(OrbitViewer):
 
         if now - self._startup_follow_started_t < self._startup_follow_duration_s:
             return
-        follow_pose = self._get_follow_pose()
-        if follow_pose is not None:
-            self._seed_free_orbit_from_follow_view(follow_pose)
+        self._exit_follow_mode()
         self._rebuild_world_axes(self.camera_target)
-        self.follow_mode = False
         self._startup_follow_done = True
         self._target_inited = True
 
@@ -4715,6 +4947,24 @@ class LiveBoxerViewer(OrbitViewer):
             )
 
         if (
+            self.show_floor_grid
+            and self._floor_grid_vao is not None
+            and self._floor_grid_count > 0
+        ):
+            self.line_prog["mvp"].write(mvp_bytes)
+            self.line_prog["line_width"].write(
+                np.array(self.floor_grid_line_width, dtype="f4").tobytes()
+            )
+            self.line_prog["prob_threshold"].write(
+                np.array(0.0, dtype="f4").tobytes()
+            )
+            self.line_prog["alpha"].write(np.array(0.8, dtype="f4").tobytes())
+            self.line_prog["viewport_size"].write(viewport.tobytes())
+            self._floor_grid_vao.render(
+                mode=self.ctx.TRIANGLES, instances=self._floor_grid_count
+            )
+
+        if (
             self.show_world_axes
             and self._axis_vao is not None
             and self._axis_count > 0
@@ -4901,6 +5151,60 @@ class LiveBoxerViewer(OrbitViewer):
             ui_control_active = ui_control_active or bool(changed) or imgui.is_item_active()
             return changed, value
 
+        def confidence_colormap_legend(
+            label: str, threshold: float, max_value: float = 1.0
+        ) -> None:
+            imgui.text(label)
+            pos = imgui.get_cursor_screen_pos()
+            draw_list = imgui.get_window_draw_list()
+            bar_w = max(140.0, float(ui_panel_width) - 36.0)
+            bar_h = max(14.0, imgui.get_text_line_height() * 0.75)
+            text_h = imgui.get_text_line_height()
+            steps = 80
+            for i in range(steps):
+                t0 = float(i) / float(steps)
+                t1 = float(i + 1) / float(steps)
+                tc = (t0 + t1) * 0.5
+                col = imgui.get_color_u32_rgba(1.0 - tc, tc, 0.0, 1.0)
+                draw_list.add_rect_filled(
+                    pos.x + t0 * bar_w,
+                    pos.y,
+                    pos.x + t1 * bar_w + 1.0,
+                    pos.y + bar_h,
+                    col,
+                )
+            border_col = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.45)
+            draw_list.add_rect(pos.x, pos.y, pos.x + bar_w, pos.y + bar_h, border_col)
+            vmax = max(1e-6, float(max_value))
+            thr = float(np.clip(threshold, 0.0, vmax))
+            thr_norm = float(np.clip(thr / vmax, 0.0, 1.0))
+            marker_x = pos.x + thr_norm * bar_w
+            marker_col = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0)
+            draw_list.add_line(
+                marker_x,
+                pos.y - 2.0,
+                marker_x,
+                pos.y + bar_h + 4.0,
+                marker_col,
+                2.0,
+            )
+            text_col = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.85)
+            low = "0.0 low"
+            high = f"{vmax:.1f} high"
+            thr_text = f"thr {thr:.2f}"
+            high_w = float(imgui.calc_text_size(high).x)
+            thr_w = float(imgui.calc_text_size(thr_text).x)
+            text_y = pos.y + bar_h + 3.0
+            draw_list.add_text(pos.x, text_y, text_col, low)
+            draw_list.add_text(pos.x + bar_w - high_w, text_y, text_col, high)
+            draw_list.add_text(
+                float(np.clip(marker_x - thr_w * 0.5, pos.x, pos.x + bar_w - thr_w)),
+                text_y + text_h + 1.0,
+                text_col,
+                thr_text,
+            )
+            imgui.dummy(imgui.ImVec2(bar_w, bar_h + text_h * 2.0 + 6.0))
+
         if ui_section("Default", default_open=True):
             rgb_hz = self.state.stream_hz() if self.state is not None else 0.0
             slam_hz = self.fs_state.stream_hz() if self.fs_state is not None else 0.0
@@ -4921,17 +5225,24 @@ class LiveBoxerViewer(OrbitViewer):
                 f"Total: {self._fmt_ms_mean30('pred_latency', self._prediction_e2e_ms)}"
             )
             _, self.thresh2d = labeled_slider_float(
-                "OWL 2D thr", self.thresh2d, 0.0, 1.0
+                "OWL 2D thr", self.thresh2d, 0.0, 0.5
             )
+            confidence_colormap_legend("OWL confidence color", self.thresh2d, 0.5)
             _, self.thresh3d = labeled_slider_float(
                 "Boxer 3D thr", self.thresh3d, 0.0, 1.0
             )
+            confidence_colormap_legend("Boxer confidence color", self.thresh3d, 1.0)
             follow_clicked = ui_button(
                 "Follow view" if not self.follow_mode else "Free orbit"
             )
             if follow_clicked:
-                self.follow_mode = not self.follow_mode
                 if self.follow_mode:
+                    self._exit_follow_mode()
+                else:
+                    self.follow_mode = True
+                    self._follow_eye = None
+                    self._follow_target = None
+                    self._follow_up = None
                     follow_pose = self._get_follow_pose()
                     if follow_pose is not None:
                         self._apply_follow_view(follow_pose)
@@ -5101,7 +5412,23 @@ class LiveBoxerViewer(OrbitViewer):
                 "Track lw", self.tracker_line_width, 2.0, 16.0
             )
             _, self.show_frustum = ui_checkbox("Show frustum", self.show_frustum)
+            _, self.frustum_scale = labeled_slider_float(
+                "Frustum scale", self.frustum_scale, 0.03, 1.0
+            )
             _, self.show_world_axes = ui_checkbox("Show axes", self.show_world_axes)
+            _, self.show_floor_grid = ui_checkbox(
+                "Show floor grid", self.show_floor_grid
+            )
+            _, self.floor_grid_height = labeled_slider_float(
+                "Grid height", self.floor_grid_height, -5.0, 1.0
+            )
+            _, self.floor_grid_size = labeled_slider_float(
+                "Grid size", self.floor_grid_size, 0.5, 20.0
+            )
+            _, self.floor_grid_line_width = labeled_slider_float(
+                "Grid thickness", self.floor_grid_line_width, 0.5, 8.0
+            )
+            self._maybe_rebuild_floor_grid_for_ui()
 
         if self.fs_state is not None and ui_section("FoundationStereo"):
             _, self.show_fs_points = ui_checkbox("Show FS pts", self.show_fs_points)
@@ -5299,6 +5626,18 @@ class LiveBoxerViewer(OrbitViewer):
             if self._recording:
                 self._stop_recording()
             self.wnd.close()
+
+    def on_mouse_drag_event(self, x, y, dx, dy):
+        if (
+            self.follow_mode
+            and self._is_in_3d_viewport(x, y)
+            and (self.mouse_dragging or self.mouse_panning)
+            and (abs(float(dx)) > 0.0 or abs(float(dy)) > 0.0)
+        ):
+            self._exit_follow_mode()
+            self._startup_follow_done = True
+            self._startup_follow_started_t = None
+        super().on_mouse_drag_event(x, y, dx, dy)
 
 
 class LiveFoundationStereoViewer(OrbitViewer):
