@@ -78,7 +78,6 @@ class AriaLoader(BaseLoader):
         pinhole=False,
         pinhole_fxy=None,
         resize=None,
-        unrotate=True,
         skip_n=1,
         max_n=999999,
         start_n=0,
@@ -104,11 +103,6 @@ class AriaLoader(BaseLoader):
         self.obb_max_depth = obb_max_depth
         # Note: self.is_adt is set later after auto-detection
         self.restrict_range = restrict_range
-        if not unrotate:
-            print(
-                "==> AriaLoader forcing unrotate=True so BoxerNet sees upright images"
-            )
-        unrotate = True
 
         print("==> loading AriaLoader with the following settings:")
         print(f"camera: {camera}")
@@ -119,7 +113,6 @@ class AriaLoader(BaseLoader):
         print(f"use_description: {use_description}")
         print(f"pinhole: {pinhole}")
         print(f"resize: {resize}")
-        print(f"unrotate: {unrotate}")
         print(f"skip_n: {skip_n}")
         print(f"max_n: {max_n}")
         print(f"start_n: {start_n}")
@@ -144,7 +137,6 @@ class AriaLoader(BaseLoader):
         self.pinhole = pinhole
         self.pinhole_fxy = pinhole_fxy
         self.resize = resize
-        self.unrotate = unrotate
         self.skip_n = skip_n
         self.max_n = max_n
 
@@ -679,11 +671,6 @@ class AriaLoader(BaseLoader):
         img_torch = torch.from_numpy(img).permute(2, 0, 1)[None].float()
         img_torch = img_torch / 255.0  # to 0-1
 
-        if self.is_nebula:
-            rotated = torch.tensor([False])
-        else:
-            rotated = torch.tensor([True])
-
         calib_idx = find_nearest2(self.calib_ts, ts_ns)
         cam_fish = timed_calibs[calib_idx].float()
         cam = cam_fish.float()
@@ -768,14 +755,12 @@ class AriaLoader(BaseLoader):
                         f"After resize to {resizeW}x{resizeH}: expected=({expected_cx:.1f}, {expected_cy:.1f}), actual=({actual_cx:.1f}, {actual_cy:.1f})"
                     )
         cam = cam.float()
-        if rotated and self.unrotate:
+        if not self.is_nebula:
             output["pinhole_cam_prerot"] = cam.clone()
             cam = cam.rotate_90_cw()
             img_torch = torch.rot90(img_torch, k=3, dims=(2, 3))
-            rotated = torch.tensor([False])
         output["img"] = img_torch.float()
         output["cam"] = cam
-        output["rotated"] = rotated
         output["orig_size"] = (WW, HH)  # Original VRS image size for bb2 scaling
 
         return output
@@ -942,8 +927,8 @@ class AriaLoader(BaseLoader):
                         bb2d_all[valid, 2] = ymin_new
                         bb2d_all[valid, 3] = ymax_new
 
-                # Rotate bb2d to match 90° CW image rotation when unrotate is active
-                if not self.is_nebula and self.unrotate:
+                # Rotate bb2d to match 90° CW image rotation applied for Aria Gen1
+                if not self.is_nebula:
                     valid = bb2d_all[:, 0] >= 0
                     if valid.any():
                         # Height of the pre-rotation image

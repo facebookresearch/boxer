@@ -418,7 +418,6 @@ class ScanNetLoader(BaseLoader):
 
         # Metadata
         datum["time_ns0"] = int(frame_id)
-        datum["rotated0"] = torch.tensor(False).reshape(1)
         datum["bb2d0"] = torch.zeros(0, 4, dtype=torch.float32)
         datum["gt_labels"] = []
 

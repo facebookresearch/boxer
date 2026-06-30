@@ -3191,8 +3191,6 @@ class SequenceOBBViewer(OBBViewer):
             else:
                 print(f"[RGB] Calib/VRS resolution match: {cam_w:.0f}x{cam_h:.0f}")
             self._logged_calib_vrs_mismatch = True
-        if not self._vrs_is_nebula:
-            img = np.rot90(img, k=3).copy()
 
         h, w = img.shape[:2]
         target_h = 1200
@@ -3454,6 +3452,12 @@ class SequenceOBBViewer(OBBViewer):
         calib_idx = int(find_nearest2(self.calib_ts, ts_ns))
         T_wr = self.traj[pose_idx].float()
         cam = self.calibs[calib_idx].float()
+        # Aria Gen1 frames are served upright by the loader; match the cam.
+        if (
+            getattr(self, "_data_source", None) == "aria"
+            and not getattr(self, "_vrs_is_nebula", True)
+        ):
+            cam = cam.rotate_90_cw()
         return cam, T_wr
 
     def _get_navigation_timestamp(self, frame_idx: int, fallback_ts: int) -> int:
@@ -3501,12 +3505,6 @@ class SequenceOBBViewer(OBBViewer):
         )
         pts_2d = pts_2d.squeeze(0).cpu().numpy()
         valid = valid.squeeze(0).cpu().numpy()
-
-        if not self._vrs_is_nebula:
-            old_x = pts_2d[:, 0].copy()
-            old_y = pts_2d[:, 1].copy()
-            pts_2d[:, 0] = self._rgb_vrs_h - 1 - old_y
-            pts_2d[:, 1] = old_x
 
         N = len(obbs)
         pts_2d = pts_2d.reshape(N, 12, S, 2)
@@ -5126,26 +5124,11 @@ class TrackerViewer(SequenceOBBViewer):
                 labels = entry["labels"]
                 sem_ids = entry.get("sem_ids", [-1] * len(labels))
                 self._bb2d_img_wh = (int(entry["img_width"]), int(entry["img_height"]))
-                orig_h = self._bb2d_img_wh[1]
-                # Gen1 VRS image is rotated 90° CW for display —
-                # swap displayed dims to match rotated image.
-                if not self._vrs_is_nebula:
-                    self._bb2d_img_wh = (
-                        int(entry["img_height"]),
-                        int(entry["img_width"]),
-                    )
                 for j in range(len(bb2d)):
                     x1 = float(bb2d[j, 0])
                     y1 = float(bb2d[j, 1])
                     x2 = float(bb2d[j, 2])
                     y2 = float(bb2d[j, 3])
-                    # Apply same 90° CW rotation to BB2 coordinates.
-                    if not self._vrs_is_nebula:
-                        rx1 = orig_h - 1 - y2
-                        ry1 = x1
-                        rx2 = orig_h - 1 - y1
-                        ry2 = x2
-                        x1, y1, x2, y2 = rx1, ry1, rx2, ry2
                     self._bb2d_current_boxes.append(
                         (
                             x1,
@@ -5509,12 +5492,6 @@ class TrackerViewer(SequenceOBBViewer):
                 )
                 pts_2d = pts_2d.squeeze(0).cpu().numpy()  # (V*12*S, 2)
                 valid = valid.squeeze(0).cpu().numpy()  # (V*12*S,)
-                # Un-rotate for Gen1
-                if not self._vrs_is_nebula:
-                    old_x = pts_2d[:, 0].copy()
-                    old_y = pts_2d[:, 1].copy()
-                    pts_2d[:, 0] = self._rgb_vrs_h - 1 - old_y
-                    pts_2d[:, 1] = old_x
                 pts_2d = pts_2d.reshape(V_rgb, 12, S, 2)
                 valid = valid.reshape(V_rgb, 12, S)
                 for i in range(V_rgb):

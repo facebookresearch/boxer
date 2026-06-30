@@ -245,7 +245,6 @@ def main():
             with_obb=args.gt2d,
             pinhole=args.pinhole,
             resize=None,
-            unrotate=True,
             skip_n=args.skip_n,
             max_n=args.max_n,
             start_n=args.start_n,
@@ -400,9 +399,8 @@ def main():
             timestamps_ns.append(int(datum["time_ns0"]))
 
         img_torch = datum["img0"]
-        rotated = datum["rotated0"]
         HH, WW = img_torch.shape[2], img_torch.shape[3]
-        img_np = torch2cv2(img_torch, rotate=rotated, ensure_rgb=True)
+        img_np = torch2cv2(img_torch, ensure_rgb=True)
         t_load = timer.stop("load")
 
         if DEBUG_VIZ:
@@ -482,7 +480,6 @@ def main():
             img_torch_255 = img_torch.clone() * 255.0
             bb2d, scores2d, label_ints, _ = owl.forward(
                 img_torch_255,
-                rotated.item(),
                 resize_to_HW=(args.detector_hw, args.detector_hw),
             )
             labels2d = [text_labels[label_int] for label_int in label_ints]
@@ -601,7 +598,6 @@ def main():
             viz_2d = render_bb2(
                 viz_2d,
                 bb2d,
-                rotated=rotated,
                 texts=bb2_texts,
                 clr=bb2_colors,
             )
@@ -648,7 +644,7 @@ def main():
                     _ts1 = time.perf_counter()
                 HH, WW = viz_3d.shape[:2]
                 viz_sdp, sdp_resized = render_depth_patches(
-                    sdp_median, rotated=rotated, HH=HH, WW=WW
+                    sdp_median, HH=HH, WW=WW
                 )
                 if DEBUG_VIZ:
                     _ts2 = time.perf_counter()
@@ -685,8 +681,6 @@ def main():
                 T_world_rig=T_wr,
                 cam=cam,
                 obbs=obb_pr_w,
-                already_rotated=rotated,
-                rotate_label=rotated,
                 colors=bb3_colors,
                 texts=bb3_texts,
             )
@@ -726,8 +720,6 @@ def main():
                         T_world_rig=T_wr,
                         cam=cam,
                         obbs=tracked_obbs,
-                        already_rotated=rotated,
-                        rotate_label=rotated,
                         colors=track_colors,
                         texts=track_texts,
                     )

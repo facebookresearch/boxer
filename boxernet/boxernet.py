@@ -601,7 +601,6 @@ class BoxerNet(nn.Module):
         img = datum["img0"]
         cam = datum["cam0"]
         T_wr = datum["T_world_rig0"]
-        rotated = datum["rotated0"]
         assert img.max() <= 1.0, "input image should be in [0,1]"
         if img.ndim == 3:
             img = img.unsqueeze(0)
@@ -613,13 +612,10 @@ class BoxerNet(nn.Module):
         if T_wr_data.ndim == 1:
             T_wr_data = T_wr_data.unsqueeze(0)
 
-        assert isinstance(rotated, torch.Tensor)
-        assert rotated.ndim == 1
         out = {}
         out["img0"] = img
         out["cam0"] = CameraTW(cam_data)
         out["T_world_rig0"] = PoseTW(T_wr_data)
-        out["rotated0"] = rotated
         return out
 
     def prepare_inputs(self, datum):
@@ -639,10 +635,7 @@ class BoxerNet(nn.Module):
         inputs["bb2d"] = bb2d
 
         for key in inputs:
-            if "rotated" in key:
-                inputs[key] = inputs[key].to(self.device).bool()
-            else:
-                inputs[key] = inputs[key].to(self.device).float()
+            inputs[key] = inputs[key].to(self.device).float()
 
         return inputs
 
@@ -661,12 +654,11 @@ class BoxerNet(nn.Module):
             )
             batch["T_world_voxel0"] = T_wv
         T_wv = batch["T_world_voxel0"]
-        rotated = batch["rotated0"]
         B, _, H, W = torch_img.shape
 
         with torch.no_grad():
             # Run DinoV3.
-            dino_feat = batch_dino(self.dino, torch_img, rotated)
+            dino_feat = batch_dino(self.dino, torch_img)
             out["dino0"] = dino_feat.clone()
             _, _, fH, fW = dino_feat.shape
             dino_feat = dino_feat.reshape(B, -1, fH * fW).permute(0, 2, 1)

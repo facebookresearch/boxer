@@ -377,7 +377,6 @@ class CALoader(BaseLoader):
         datum["obbs"] = obbs
         datum["sdp_w"] = frame["sdp_w"].float()
         datum["time_ns0"] = frame["timestamp_ns"]
-        datum["rotated0"] = torch.tensor(False).reshape(1)
 
         # Compute pseudo 2D bounding boxes from OBBs
         if len(obbs) > 0:

@@ -328,7 +328,7 @@ class OwlWrapper(nn.Module):
                 self.vision_detector(dummy, self.text_embeddings, self.query_mask)
 
     @torch.no_grad()
-    def forward(self, image_torch, rotated=False, resize_to_HW=(906, 906)):
+    def forward(self, image_torch, resize_to_HW=(906, 906)):
         _debug = os.environ.get("DEBUG", "0") == "1"
         assert len(image_torch.shape) == 4, "input image should be 4D tensor"
         assert image_torch.shape[0] == 1, "only batch size 1 is supported"
@@ -344,8 +344,6 @@ class OwlWrapper(nn.Module):
             _t0 = time.perf_counter()
 
         input_image = image_torch.clone()
-        if rotated:
-            input_image = torch.rot90(input_image, k=3, dims=(2, 3))  # 90 CW
         HH, WW = input_image.shape[2], input_image.shape[3]
 
         # Preprocess: resize to native model resolution, normalize
@@ -428,15 +426,6 @@ class OwlWrapper(nn.Module):
 
         # Convert x1, y1, x2, y2 -> x1, x2, y1, y2 convention
         boxes = boxes[:, [0, 2, 1, 3]]
-
-        if rotated:
-            # Rotate boxes back by 90 degrees counter-clockwise
-            x1, x2, y1, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-            new_x1 = y1
-            new_x2 = y2
-            new_y1 = WW - x2
-            new_y2 = WW - x1
-            boxes = torch.stack([new_x1, new_x2, new_y1, new_y2], dim=-1)
 
         if _debug:
             _t3 = time.perf_counter()

@@ -182,14 +182,6 @@ class TestOwlMatchesTransformers(unittest.TestCase):
         # Restore original prompts
         wrapper.set_text_prompts(["cat", "dog"])
 
-    def test_rotated_input(self):
-        """Verify rotated input doesn't crash and returns valid output."""
-        img, _ = _get_forward_result()
-        boxes, scores, labels, masks = self.wrapper.forward(img, rotated=True)
-
-        self.assertIsInstance(boxes, torch.Tensor)
-        self.assertEqual(boxes.shape[1], 4) if len(boxes) > 0 else None
-
     def test_box_coordinate_convention(self):
         """Verify boxes use x1, x2, y1, y2 convention (not x1, y1, x2, y2)."""
         _, (boxes, scores, labels, _) = _get_forward_result()

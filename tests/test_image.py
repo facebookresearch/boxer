@@ -96,11 +96,6 @@ class TestTorch2Cv2:
         result = torch2cv2(img, rgb2bgr=False)
         assert result.shape == (8, 8, 3)  # first batch element used
 
-    def test_rotate(self):
-        img = torch.rand(3, 8, 16)
-        result = torch2cv2(img, rotate=True, rgb2bgr=False)
-        assert result.shape == (16, 8, 3)  # 90 deg rotation swaps H and W
-
     def test_numpy_input(self):
         img = np.random.rand(3, 8, 8).astype(np.float32)
         result = torch2cv2(img, rgb2bgr=False)

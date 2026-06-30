@@ -131,7 +131,6 @@ def normalize(img, robust=0.0, eps=1e-6):
 
 def torch2cv2(
     img: Union[np.ndarray, torch.Tensor],
-    rotate: bool = False,
     rgb2bgr: bool = True,
     ensure_rgb: bool = False,
     robust_quant: float = 0.0,
@@ -141,7 +140,6 @@ def torch2cv2(
 
     Args:
         img: image CxHxW float32 image
-        rotate: if True, rotate image 90 degrees
         rgb2bgr: convert image to BGR
         ensure_rgb: ensure RGB if True (i.e. replicate the single color channel 3 times)
         robust_quant: quantile to robustly copute min and max for normalization of the image.
@@ -160,10 +158,7 @@ def torch2cv2(
 
     if rgb2bgr:
         img_cv2 = img_cv2[:, :, ::-1]
-    if rotate:
-        img_cv2 = rotate_image90(img_cv2)
-    else:
-        img_cv2 = np.ascontiguousarray(img_cv2)
+    img_cv2 = np.ascontiguousarray(img_cv2)
     if ensure_rgb and img_cv2.shape[2] == 1:
         img_cv2 = img_cv2[:, :, 0]
     if ensure_rgb and img_cv2.ndim == 2:
@@ -262,9 +257,7 @@ def draw_bb3s(
     draw_score=False,
     render_obb_corner_steps=6,
     line_type=cv2.LINE_AA,
-    rotate_label=True,
     white_backing_line=False,
-    already_rotated=False,
     prob_color=False,
     colors=None,
     texts=None,
@@ -273,9 +266,6 @@ def draw_bb3s(
 ):
     if obbs.shape[0] == 0:
         return viz
-
-    if already_rotated:
-        viz = cv2.rotate(viz, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
     # Get pose of camera.
     T_world_cam = T_world_rig.float() @ cam.T_camera_rig.inverse()
@@ -325,15 +315,8 @@ def draw_bb3s(
                     label_items.append((center, text, text_clr, score))
 
         if label_items:
-            height = viz.shape[0]
-            if rotate_label:
-                viz = cv2.rotate(viz, cv2.ROTATE_90_CLOCKWISE)
-
             for center, text, text_clr, score in label_items:
-                if rotate_label:
-                    x, y = height - center[1], center[0]
-                else:
-                    x, y = center
+                x, y = center
                 put_text(viz, text, scale=text_sz, font_pt=(x, y), color=text_clr)
                 if score is not None:
                     ((txt_w, txt_h), _) = cv2.getTextSize(
@@ -347,18 +330,10 @@ def draw_bb3s(
                         color=text_clr,
                     )
 
-            if rotate_label:
-                viz = cv2.rotate(viz, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-    if already_rotated:
-        viz = cv2.rotate(viz, cv2.ROTATE_90_CLOCKWISE)
-
     return viz
 
 
-def render_bb2(img, bb2s, scale=1.0, clr=(0, 255, 0), rotated=False, texts=None):
-    if rotated:
-        img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+def render_bb2(img, bb2s, scale=1.0, clr=(0, 255, 0), texts=None):
     if texts is not None:
         assert len(texts) == len(bb2s)
 
@@ -377,35 +352,16 @@ def render_bb2(img, bb2s, scale=1.0, clr=(0, 255, 0), rotated=False, texts=None)
         cv2.rectangle(
             img, (xmin, ymin), (xmax, ymax), cc, int(round(scale * 1)), lineType=16
         )
-        if texts is not None and not rotated:
+        if texts is not None:
             # Place text in the center of the bounding box
             center_x = (xmin + xmax) // 2
             center_y = (ymin + ymax) // 2
             put_text(img, texts[i], scale=0.35, font_pt=(center_x, center_y), color=cc)
 
-    if rotated:
-        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-        if texts is not None:
-            for i, bb2 in enumerate(bb2s):
-                xmin = int(round(float(bb2[0])))
-                xmax = int(round(float(bb2[1])))
-                ymin = int(round(float(bb2[2])))
-                ymax = int(round(float(bb2[3])))
-                W = img.shape[1]  # Width of rotated image = Height of original
-                # After 90° CW rotation: original (x,y) -> (H_orig - 1 - y, x)
-                # Center of original box: ((xmin+xmax)/2, (ymin+ymax)/2)
-                # Maps to rotated: (H_orig - 1 - (ymin+ymax)/2, (xmin+xmax)/2)
-                # H_orig = W (width of rotated image)
-                center_x = W - 1 - (ymin + ymax) // 2
-                center_y = (xmin + xmax) // 2
-                cc = colors[i]
-                put_text(
-                    img, texts[i], scale=0.35, font_pt=(center_x, center_y), color=cc
-                )
     return img
 
 
-def render_depth_patches(sdp_median, rotated, HH, WW):
+def render_depth_patches(sdp_median, HH, WW):
     """Returns (colorized_bgr, raw_resized_numpy) to avoid duplicate interpolation."""
     raw_small = sdp_median.squeeze().numpy()
     # Colorize at small resolution, then resize (much faster than colorizing full-res)
@@ -417,7 +373,4 @@ def render_depth_patches(sdp_median, rotated, HH, WW):
     # Resize colorized and raw to full resolution
     sdp_img2 = cv2.resize(sdp_color_small, (WW, HH), interpolation=cv2.INTER_NEAREST)
     raw_np = cv2.resize(raw_small, (WW, HH), interpolation=cv2.INTER_NEAREST)
-    if rotated:
-        sdp_img2 = cv2.rotate(sdp_img2, cv2.ROTATE_90_CLOCKWISE)
-        raw_np = np.rot90(raw_np, k=-1).copy()
     return sdp_img2, raw_np

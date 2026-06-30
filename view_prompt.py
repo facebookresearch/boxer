@@ -443,12 +443,6 @@ def main():
             img_u = u_norm * self._rgb_vrs_w
             img_v = v_norm * self._rgb_vrs_h
 
-            # Aria Gen 1: undo rot90 k=3 applied in _load_rgb_for_timestamp
-            if not self._vrs_is_nebula:
-                orig_u = img_v
-                orig_v = self._rgb_vrs_w - 1 - img_u
-                img_u, img_v = orig_u, orig_v
-
             return img_u, img_v
 
         def on_mouse_press_event(self, x, y, button):
@@ -602,13 +596,11 @@ def main():
             cam_scaled._data[5] *= scale_y
 
             sdp_w = self._get_sdp_for_timestamp(ts_ns)
-            rotated = not self._vrs_is_nebula
 
             datum = {
                 "img0": img_torch[None],
                 "cam0": cam_scaled.float(),
                 "T_world_rig0": T_wr.float(),
-                "rotated0": torch.tensor([rotated]),
                 "sdp_w": sdp_w.float(),
                 "bb2d": bb2d,
             }
@@ -665,15 +657,8 @@ def main():
             if rect is None:
                 return None
             ix, iy, iw, ih = rect
-            # Aria Gen 1: apply rot90 k=3
-            if not self._vrs_is_nebula:
-                disp_u = self._rgb_vrs_w - 1 - img_v
-                disp_v = img_u
-            else:
-                disp_u = img_u
-                disp_v = img_v
-            u_norm = disp_u / self._rgb_vrs_w
-            v_norm = disp_v / self._rgb_vrs_h
+            u_norm = img_u / self._rgb_vrs_w
+            v_norm = img_v / self._rgb_vrs_h
             return ix + u_norm * iw, iy + v_norm * ih
 
         def _run_owl_prompt(self):
@@ -694,7 +679,6 @@ def main():
                 return
 
             H, W = img_np.shape[:2]
-            rotated = not self._vrs_is_nebula
             # Run OWL 2D detection
             owl.set_text_prompts([self._owl_text])
             img_torch_255 = (
@@ -702,7 +686,7 @@ def main():
             )  # (1, 3, H, W) in [0, 255]
             t0 = time.perf_counter()
             boxes, scores2d, label_ints, _ = owl.forward(
-                img_torch_255, rotated, resize_to_HW=(906, 906)
+                img_torch_255, resize_to_HW=(906, 906)
             )
             self._owl_dt_owl = (time.perf_counter() - t0) * 1000
 
@@ -760,7 +744,6 @@ def main():
                 "img0": img_torch[None],
                 "cam0": cam_scaled.float(),
                 "T_world_rig0": T_wr.float(),
-                "rotated0": torch.tensor([rotated]),
                 "sdp_w": sdp_w.float(),
                 "bb2d": bb2d,
             }
@@ -1559,15 +1542,6 @@ def main():
             depths = depths[mask]
 
             # pts_2d is now in VRS pixel coords (_rgb_vrs_w × _rgb_vrs_h).
-            # The displayed RGB was rotated (rot90 k=3 for non-nebula) then
-            # resized by _rgb_img_scale.  Apply the same transforms.
-            if not self._vrs_is_nebula:
-                # rot90 k=3: (x, y) -> (H-1-y, x)  where H = _rgb_vrs_h
-                old_x = pts_2d[:, 0].copy()
-                old_y = pts_2d[:, 1].copy()
-                pts_2d[:, 0] = self._rgb_vrs_h - 1 - old_y
-                pts_2d[:, 1] = old_x
-
             # Scale by _rgb_img_scale (same resize applied to the displayed image)
             pts_2d *= self._rgb_img_scale
 
@@ -1655,10 +1629,9 @@ def main():
                 patch_size,
             )  # (1, 1, fH, fW)
 
-            rotated = not self._vrs_is_nebula
             HH, WW = rgb.shape[:2]
             viz_sdp_bgr, sdp_resized = render_depth_patches(
-                sdp_patch[0].cpu(), rotated=rotated, HH=HH, WW=WW
+                sdp_patch[0].cpu(), HH=HH, WW=WW
             )
             viz_sdp = cv2.cvtColor(np.ascontiguousarray(viz_sdp_bgr), cv2.COLOR_BGR2RGB)
             mask = sdp_resized > 0.1
