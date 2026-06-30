@@ -13,7 +13,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EVAL_PATH = os.path.join(_REPO_ROOT, "output")
 CKPT_PATH = os.path.join(_REPO_ROOT, "ckpts")
 SAMPLE_DATA_PATH = os.path.join(_REPO_ROOT, "sample_data")
-DEFAULT_BOXERNET_CKPT = "boxernet_hw960in4x6d768-3e37cfc4.ckpt"
+DEFAULT_BOXERNET_CKPT = "boxernet_hw960in2x6d768-c88128f8.ckpt"
 
 
 class CudaTimer:
