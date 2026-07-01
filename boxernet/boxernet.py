@@ -270,7 +270,7 @@ def sdp_to_patches(sdp_w, cam, T_wr, H, W, patch_size):
         patch_size: size of each patch (e.g., 16 for DINO)
 
     Returns:
-        (B, 1, fH, fW) median depth per patch, where fH=H//patch_size, fW=W//patch_size
+        (B, 1, fH, fW) mean depth per patch, where fH=H//patch_size, fW=W//patch_size
         Invalid patches have value -1
     """
     assert sdp_w.ndim == 3, f"Expected 3D (BxNx3) sdp_w, got {sdp_w.ndim}D tensor"
@@ -333,15 +333,18 @@ def sdp_to_patches(sdp_w, cam, T_wr, H, W, patch_size):
     fH, fW = H // patch_size, W // patch_size
     num_patches = fH * fW
 
-    sdp_median = masked_median(
-        sdp_patches.reshape(B * num_patches, -1),
-        mask.reshape(B * num_patches, -1),
-        dim=1,
+    sdp_flat = sdp_patches.reshape(B * num_patches, -1)
+    mask_flat = mask.reshape(B * num_patches, -1)
+    valid_counts = mask_flat.sum(dim=1)
+    sdp_sum = (sdp_flat * mask_flat).sum(dim=1)
+    sdp_mean = torch.where(
+        valid_counts > 0,
+        sdp_sum / valid_counts.clamp(min=1),
+        torch.full_like(sdp_sum, -1.0),
     )
-    sdp_median = sdp_median.reshape(B, 1, fH, fW)
-    sdp_median[torch.isnan(sdp_median)] = -1
+    sdp_mean = sdp_mean.reshape(B, 1, fH, fW)
 
-    return sdp_median
+    return sdp_mean
 
 
 def generate_patch_centers(B, fH, fW, patch_size, device):
