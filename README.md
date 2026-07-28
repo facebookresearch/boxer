@@ -1,5 +1,7 @@
 ## 🥊 Boxer: Robust Lifting of Open-World 2D Bounding Boxes to 3D
 
+> 🎉 **Boxer has been accepted to ECCV 2026!**
+
 ![Boxer System Architecture](docs/images/boxer_system.jpg)
 
 Boxer lifts 2D object detections into static, global, fused 3D oriented bounding boxes (OBBs) from posed images and semi-dense point clouds, focused on indoor object detection. This repo contains the code and pre-trained model (no training code) needed to run Boxer on a variety of input data sources (inference only code).
@@ -317,9 +319,10 @@ bash tests/run_tests.sh --no-open
 If you find Boxer useful in your research, please consider citing:
 
 ```bibtex
-@article{boxer2026,
+@inproceedings{boxer2026,
       title={Boxer: Robust Lifting of Open-World 2D Bounding Boxes to 3D},
       author={Daniel DeTone and Tianwei Shen and Fan Zhang and Lingni Ma and Julian Straub and Richard Newcombe and Jakob Engel},
+      booktitle={European Conference on Computer Vision (ECCV)},
       year={2026},
 }
 ```
