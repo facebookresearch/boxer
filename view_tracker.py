@@ -11,6 +11,7 @@ import argparse
 import os
 
 from utils.file_io import read_obb_csv
+from utils.viser_viewer import run_viser_tracker_viewer
 from utils.viewer_3d import (
     TrackerViewer,
     add_common_args,
@@ -38,6 +39,14 @@ def main():
     parser.add_argument("--teaser", action="store_true")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose tracker logging")
     parser.add_argument("--bb2d_csv", type=str, default="", help="2D BB CSV filename (relative to log_dir)")
+    parser.add_argument("--viewer_backend", type=str, default="local", choices=["local", "viser"], help="Viewer backend")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Viser host")
+    parser.add_argument("--port", type=int, default=8080, help="Viser port")
+    parser.add_argument("--init_freeze_tracker", action="store_true", help="Start viser tracker with freeze mode enabled")
+    parser.add_argument("--viser_param_apply_delay", type=float, default=0.3, help="Viser tracker parameter apply delay in seconds")
+    parser.add_argument("--viser_seek_debounce_sec", type=float, default=0.12, help="Viser tracker seek debounce in seconds")
+    parser.add_argument("--viser_no_sdp", action="store_true", help="Disable scene point cloud in viser tracker")
+    parser.add_argument("--viser_no_rgb_3d_overlay", action="store_true", help="Disable 3D overlay on RGB in viser tracker")
     # fmt: on
     args = parser.parse_args()
 
@@ -48,13 +57,30 @@ def main():
     # Load OBBs
     tracked_csv = os.path.join(log_dir, f"{args.write_name}_3dbbs_tracked.csv")
     raw_csv = os.path.join(log_dir, f"{args.write_name}_3dbbs.csv")
-    csv_path = tracked_csv if os.path.exists(tracked_csv) else raw_csv
-    if not os.path.exists(csv_path):
-        raise IOError(f"3D BB CSV not found: {csv_path}")
+
+    timed_obbs = None
+    csv_path = None
+    if os.path.exists(tracked_csv):
+        tracked_obbs = read_obb_csv(tracked_csv)
+        if len(tracked_obbs) <= 1 and os.path.exists(raw_csv):
+            print(
+                f"[WARN] {tracked_csv} has only {len(tracked_obbs)} timestamp(s). "
+                f"Falling back to raw detections: {raw_csv}"
+            )
+            csv_path = raw_csv
+            timed_obbs = read_obb_csv(raw_csv)
+        else:
+            csv_path = tracked_csv
+            timed_obbs = tracked_obbs
+    elif os.path.exists(raw_csv):
+        csv_path = raw_csv
+        timed_obbs = read_obb_csv(raw_csv)
+
+    if csv_path is None or timed_obbs is None:
+        raise IOError(f"3D BB CSV not found: {raw_csv} or {tracked_csv}")
 
     if args.verbose:
         print(f"==> Loading OBBs from {csv_path}")
-    timed_obbs = read_obb_csv(csv_path)
     timed_obbs = subsample_timed_obbs(
         timed_obbs, skip_n=args.skip_n, start_n=args.start_n, max_n=args.max_n
     )
@@ -63,6 +89,22 @@ def main():
         print(f"==> Loaded {len(timed_obbs)} frames, {total_dets} detections")
 
     seq_ctx = build_seq_ctx(input_path, dataset_type)
+
+    if args.viewer_backend == "viser":
+        run_viser_tracker_viewer(
+            timed_obbs,
+            seq_name=seq_name,
+            seq_ctx=seq_ctx,
+            init_freeze_tracker=bool(args.init_freeze_tracker),
+            seek_debounce_sec=float(args.viser_seek_debounce_sec),
+            param_apply_delay_sec=float(args.viser_param_apply_delay),
+            show_sdp=not bool(args.viser_no_sdp),
+            show_rgb_3d_overlay=not bool(args.viser_no_rgb_3d_overlay),
+            host=args.host,
+            port=args.port,
+        )
+        return
+
     bb2d_csv_path = resolve_bb2d_csv(log_dir, args.bb2d_csv, args.write_name)
 
     default_w, default_h = 2250 * scale_factor, 1100 * scale_factor

@@ -14,8 +14,10 @@ import torch
 
 from utils.demo_utils import DEFAULT_SEQ, EVAL_PATH
 from utils.file_io import read_obb_csv
+from utils.viser_viewer import run_viser_fusion_viewer
 from utils.viewer_3d import (
     OBBViewer,
+    build_seq_ctx,
     launch_viewer,
     resolve_input,
     scale_factor,
@@ -36,6 +38,17 @@ def main():
     parser.add_argument("--window_w", type=int, default=0, help="Initial window width (0 = default)")
     parser.add_argument("--window_h", type=int, default=0, help="Initial window height (0 = default)")
     parser.add_argument("--init_color_mode", type=str, default=None, help="Initial 3DBB color mode")
+    parser.add_argument("--viewer_backend", type=str, default="local", choices=["local", "viser"], help="Viewer backend")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Viser host")
+    parser.add_argument("--port", type=int, default=8080, help="Viser port")
+    parser.add_argument("--viser_with_seq_ctx", action="store_true", help="Load sequence context for fusion viser extras")
+    parser.add_argument("--viser_no_seq_ctx", action="store_true", help="Disable sequence context loading for fusion viser")
+    parser.add_argument("--viser_show_rgb", action="store_true", help="Show RGB panel in fusion viser")
+    parser.add_argument("--viser_show_sdp", action="store_true", help="Force-enable scene point cloud in fusion viser")
+    parser.add_argument("--viser_no_sdp", action="store_true", help="Disable scene point cloud in fusion viser")
+    parser.add_argument("--viser_no_rgb_3d_overlay", action="store_true", help="Disable 3D box overlays on RGB in fusion viser")
+    parser.add_argument("--viser_sdp_point_size", type=float, default=0.004, help="Fusion viser SDP point size")
+    parser.add_argument("--viser_seek_debounce_sec", type=float, default=0.08, help="Fusion viser frame-seek debounce in seconds")
     # fmt: on
     args = parser.parse_args()
 
@@ -65,6 +78,36 @@ def main():
     )
     total_dets = sum(len(obbs) for obbs in timed_obbs.values())
     print(f"==> Loaded {len(timed_obbs)} frames, {total_dets} detections")
+
+    if args.viewer_backend == "viser":
+        show_sdp = bool(args.viser_show_sdp) or (not bool(args.viser_no_sdp))
+        need_seq_ctx = bool(
+            (not bool(args.viser_no_seq_ctx))
+            and (args.viser_with_seq_ctx or args.viser_show_rgb or show_sdp)
+        )
+        seq_ctx = None
+        if need_seq_ctx:
+            try:
+                seq_ctx = build_seq_ctx(input_path, dataset_type)
+            except Exception as exc:
+                print(
+                    f"[WARN] Failed to load seq_ctx for fusion viser extras: {exc}. "
+                    "Falling back to basic 3D-only fusion viewer."
+                )
+
+        run_viser_fusion_viewer(
+            timed_obbs,
+            seq_name=seq_name,
+            seq_ctx=seq_ctx,
+            show_rgb=bool(args.viser_show_rgb),
+            show_sdp=bool(show_sdp),
+            show_rgb_3d_overlay=not bool(args.viser_no_rgb_3d_overlay),
+            sdp_point_size=float(args.viser_sdp_point_size),
+            seek_debounce_sec=float(args.viser_seek_debounce_sec),
+            host=args.host,
+            port=args.port,
+        )
+        return
 
     # Stack all OBBs
     from utils.tw.obb import ObbTW
