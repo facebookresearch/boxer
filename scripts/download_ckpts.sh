@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# This source code is licensed under the BOXER License found in the
 # LICENSE file in the root directory of this source tree.
 
 # Download BoxerNet, DinoV3, and OWLv2 checkpoints from HuggingFace.

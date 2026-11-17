@@ -329,4 +329,4 @@ If you find Boxer useful in your research, please consider citing:
 
 ## License
 
-The majority of Boxer is licensed under CC-BY-NC. See the [LICENSE](LICENSE) file for details. However portions of the project are available under separate license terms: see [NOTICE](NOTICE).
+The Boxer Materials are licensed under the [BOXER License](LICENSE). Certain third-party portions of the project are available under separate license terms; see [NOTICE](NOTICE). See the [license change notice](LICENSE_CHANGE_NOTICE.md) for details about the transition from CC BY-NC 4.0 effective November 17, 2026.

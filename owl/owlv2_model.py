@@ -1,6 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This source code is licensed under the CC-BY-NC 4.0 license found in the
-# LICENSE file in the root directory of this source tree.
+# This file contains third-party code subject to separate license terms.
+# See the NOTICE file in the root directory of this source tree.
 
 """Pure PyTorch reimplementation of OWLv2 vision encoder + detection heads.
 

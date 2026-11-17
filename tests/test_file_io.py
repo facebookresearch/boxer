@@ -1,5 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This source code is licensed under the CC-BY-NC 4.0 license found in the
+# This source code is licensed under the BOXER License found in the
 # LICENSE file in the root directory of this source tree.
 
 """Tests for OBB CSV read/write round-trips in file_io.py."""
